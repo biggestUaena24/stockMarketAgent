@@ -1,0 +1,112 @@
+name: Cedar research schedule
+
+on:
+  schedule:
+    - cron: "30 7 * * 1-5"
+      timezone: "America/Edmonton"
+    - cron: "30 17 * * 1-5"
+      timezone: "America/Edmonton"
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: Research run to start
+        required: true
+        default: morning
+        type: choice
+        options:
+          - morning
+          - evening
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cedar-research-schedule
+  cancel-in-progress: false
+
+jobs:
+  run-research:
+    name: Run private research
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SITE_URL: ${{ vars.CEDAR_SITE_URL }}
+      SCHEDULER_SECRET: ${{ secrets.SCHEDULER_SECRET }}
+      SITES_BYPASS_TOKEN: ${{ secrets.SITES_BYPASS_TOKEN }}
+
+    steps:
+      - name: Select Calgary research slot
+        id: slot
+        shell: bash
+        env:
+          MANUAL_SLOT: ${{ inputs.slot }}
+          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            slot="${MANUAL_SLOT}"
+          elif [[ "${SCHEDULE_EXPRESSION}" == "30 7 * * 1-5" ]]; then
+            slot="morning"
+          elif [[ "${SCHEDULE_EXPRESSION}" == "30 17 * * 1-5" ]]; then
+            slot="evening"
+          else
+            echo "::error::Unable to map this trigger to a research slot."
+            exit 1
+          fi
+
+          echo "slot=${slot}" >> "${GITHUB_OUTPUT}"
+          echo "Starting the ${slot} Calgary research run."
+
+      - name: Call private scheduled endpoint
+        shell: bash
+        env:
+          RESEARCH_SLOT: ${{ steps.slot.outputs.slot }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ! "${SITE_URL}" =~ ^https://[^/]+/?$ ]]; then
+            echo "::error::Set the CEDAR_SITE_URL repository variable to the deployed HTTPS origin."
+            exit 1
+          fi
+          if [[ -z "${SCHEDULER_SECRET}" ]]; then
+            echo "::error::The SCHEDULER_SECRET repository secret is missing."
+            exit 1
+          fi
+          if [[ -z "${SITES_BYPASS_TOKEN}" ]]; then
+            echo "::error::The SITES_BYPASS_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+          endpoint="${SITE_URL%/}/api/scheduled/run"
+          response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
+
+          if ! http_status="$(
+            curl \
+              --silent \
+              --show-error \
+              --request POST \
+              --connect-timeout 20 \
+              --max-time 1200 \
+              --retry 2 \
+              --retry-delay 5 \
+              --retry-all-errors \
+              --output "${response_file}" \
+              --write-out "%{http_code}" \
+              --header "Authorization: Bearer ${SCHEDULER_SECRET}" \
+              --header "OAI-Sites-Authorization: Bearer ${SITES_BYPASS_TOKEN}" \
+              --header "Content-Type: application/json" \
+              --data "{\"slot\":\"${RESEARCH_SLOT}\"}" \
+              "${endpoint}"
+          )"; then
+            echo "::error::The scheduled endpoint could not be reached."
+            exit 1
+          fi
+
+          if [[ ! "${http_status}" =~ ^2[0-9][0-9]$ ]]; then
+            echo "::error::Scheduled research failed with HTTP ${http_status}."
+            exit 1
+          fi
+
+          echo "The ${RESEARCH_SLOT} research run completed with HTTP ${http_status}."
