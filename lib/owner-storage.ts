@@ -56,18 +56,18 @@ export async function ensureCanonicalOwnerStorage(
     throw new Error("OWNER_EMAIL cannot be normalized to a storage key.");
   }
 
-  const ownerUnion = OWNER_SCOPED_TABLES.map(
-    (table) => `SELECT owner_email FROM ${table}`,
-  ).join(" UNION ALL ");
-  const result = await d1
-    .prepare(
-      `SELECT DISTINCT owner_email AS ownerEmail
-       FROM (${ownerUnion})`,
-    )
-    .all<{ ownerEmail: string }>();
+  // Keep these as independent bounded reads. Combining every owner table into
+  // one UNION can exceed the compound-select limit on the hosted D1 runtime.
+  const discoveredOwnerEmails: string[] = [];
+  for (const table of OWNER_SCOPED_TABLES) {
+    const result = await d1
+      .prepare(`SELECT DISTINCT owner_email AS ownerEmail FROM ${table}`)
+      .all<{ ownerEmail: string }>();
+    discoveredOwnerEmails.push(...result.results.map((row) => row.ownerEmail));
+  }
   const plan = planOwnerStorageRekey(
     canonical,
-    result.results.map((row) => row.ownerEmail),
+    discoveredOwnerEmails,
   );
 
   if (plan.status === "none") return;

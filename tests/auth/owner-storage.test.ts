@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { planOwnerStorageRekey } from "../../lib/owner-storage.js";
+import {
+  ensureCanonicalOwnerStorage,
+  planOwnerStorageRekey,
+} from "../../lib/owner-storage.js";
 
 test("rekeys one legacy owner casing to the configured canonical key", () => {
   assert.deepEqual(
@@ -36,4 +39,25 @@ test("fails closed when owner records span multiple casing variants", () => {
     ]),
     { status: "conflict" },
   );
+});
+
+test("hosted owner discovery uses bounded table reads instead of a compound SELECT", async () => {
+  const statements: string[] = [];
+  const fakeD1 = {
+    prepare(statement: string) {
+      statements.push(statement);
+      return {
+        async all() {
+          return { results: [] };
+        },
+      };
+    },
+    async batch() {
+      throw new Error("A rekey batch should not run when no owner rows exist.");
+    },
+  } as unknown as D1Database;
+
+  await ensureCanonicalOwnerStorage(fakeD1, "owner@example.com");
+  assert.equal(statements.length, 10);
+  assert.equal(statements.some((statement) => /\bUNION\b/i.test(statement)), false);
 });
