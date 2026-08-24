@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
 import { runtimeSchemaStatements } from "./runtime-schema";
 import { ensureCanonicalOwnerStorage } from "../lib/owner-storage";
+import { redactStoredResearchRunSecrets } from "../lib/secret-redaction";
 import { getRuntimeEnv } from "../lib/runtime-env";
 
 let schemaReady: Promise<void> | null = null;
@@ -31,6 +32,19 @@ export async function ensureDatabase(): Promise<void> {
       if (configuredOwnerEmail) {
         await ensureCanonicalOwnerStorage(d1, configuredOwnerEmail);
       }
+      await redactStoredResearchRunSecrets(
+        d1,
+        [
+          "ALPHA_VANTAGE_API_KEY",
+          "FMP_API_KEY",
+          "OPENAI_API_KEY",
+          "RESEND_API_KEY",
+          "SCHEDULER_SECRET",
+        ].flatMap((key) => {
+          const value = getRuntimeEnv(key);
+          return value ? [value] : [];
+        }),
+      );
     })().catch((error) => {
       schemaReady = null;
       throw error;

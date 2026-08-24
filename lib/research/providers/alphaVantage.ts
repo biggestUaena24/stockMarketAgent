@@ -26,6 +26,7 @@ import {
   normalizedRatio,
   stableNewsId,
 } from "./normalize";
+import { redactSensitiveText } from "@/lib/secret-redaction";
 
 type RawObject = Record<string, unknown>;
 
@@ -35,6 +36,9 @@ export interface AlphaVantageTrialOptions {
   cache?: ProviderCache;
   now?: () => Date;
   baseUrl?: string;
+  requestSpacingMs?: number;
+  clockMs?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 function objectValue(value: unknown): RawObject | null {
@@ -59,14 +63,16 @@ function alphaPayloadError(payload: unknown): string | null {
 function alphaFailure<T>(
   source: ProviderResult<unknown>,
   message: string,
+  sensitiveValues: readonly string[] = [],
 ): ProviderResult<T> {
+  const safeMessage = redactSensitiveText(message, sensitiveValues);
   return {
     ok: false,
     error: {
-      code: /frequency|rate limit|requests per/i.test(message)
+      code: /frequency|rate limit|requests per/i.test(safeMessage)
         ? "rate-limit"
         : "upstream",
-      message: `Alpha Vantage: ${message}`,
+      message: `Alpha Vantage: ${safeMessage}`,
       retryable: true,
     },
     meta: source.meta,
@@ -81,6 +87,11 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
   private readonly cache?: ProviderCache;
   private readonly now: () => Date;
   private readonly baseUrl: string;
+  private readonly requestSpacingMs: number;
+  private readonly clockMs: () => number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private requestQueue: Promise<void> = Promise.resolve();
+  private nextRequestAt = 0;
 
   constructor(options: AlphaVantageTrialOptions = {}) {
     this.apiKey = options.apiKey?.trim() ?? "";
@@ -89,6 +100,15 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
     this.now = options.now ?? (() => new Date());
     this.baseUrl =
       options.baseUrl?.replace(/\/+$/, "") ?? "https://www.alphavantage.co/query";
+    this.requestSpacingMs = Math.max(
+      0,
+      Math.trunc(options.requestSpacingMs ?? 1_100),
+    );
+    this.clockMs = options.clockMs ?? (() => Date.now());
+    this.sleep =
+      options.sleep ??
+      ((milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
   private async call<T>(
@@ -117,7 +137,7 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
       url,
       cacheKey,
       cacheTtlMs,
-      fetcher: this.fetcher,
+      fetcher: this.throttledFetch,
       cache: this.cache,
       now: this.now,
     });
@@ -125,11 +145,29 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
     if (result.ok) {
       const providerError = alphaPayloadError(result.data);
       if (providerError) {
-        return alphaFailure(result, providerError);
+        return alphaFailure(result, providerError, [this.apiKey]);
       }
     }
     return result;
   }
+
+  private readonly throttledFetch: FetchLike = async (input, init) => {
+    let release!: () => void;
+    const previous = this.requestQueue;
+    this.requestQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      const waitMs = Math.max(0, this.nextRequestAt - this.clockMs());
+      if (waitMs > 0) await this.sleep(waitMs);
+      this.nextRequestAt = this.clockMs() + this.requestSpacingMs;
+    } finally {
+      release();
+    }
+    const fetcher = this.fetcher ?? globalThis.fetch.bind(globalThis);
+    return fetcher(input, init);
+  };
 
   async getQuote(symbol: string): Promise<ProviderResult<NormalizedQuote>> {
     const result = await this.call<RawObject>(

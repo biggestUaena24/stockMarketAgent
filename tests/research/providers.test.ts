@@ -64,6 +64,59 @@ test("Alpha Vantage quote normalization includes safe cache metadata", async () 
   assert.equal(fetchCount, 1);
 });
 
+test("Alpha Vantage serializes free-tier network requests with spacing", async () => {
+  let clock = 0;
+  const startedAt: number[] = [];
+  const provider = new AlphaVantageTrialProvider({
+    apiKey: "test-secret",
+    now: fixedNow,
+    requestSpacingMs: 1_100,
+    clockMs: () => clock,
+    sleep: async (milliseconds) => {
+      clock += milliseconds;
+    },
+    fetcher: async (input) => {
+      startedAt.push(clock);
+      const url = new URL(String(input));
+      const symbol = url.searchParams.get("symbol") ?? "UNKNOWN";
+      return Response.json({
+        "Global Quote": {
+          "01. symbol": symbol,
+          "05. price": "100",
+          "07. latest trading day": "2026-07-22",
+        },
+      });
+    },
+  });
+
+  const results = await Promise.all([
+    provider.getQuote("AAPL"),
+    provider.getQuote("MSFT"),
+    provider.getQuote("GOOG"),
+  ]);
+  assert.equal(results.every((result) => result.ok), true);
+  assert.deepEqual(startedAt, [0, 1_100, 2_200]);
+});
+
+test("Alpha Vantage redacts a key echoed by an upstream error", async () => {
+  const apiKey = "SECRETKEY123456";
+  const result = await new AlphaVantageTrialProvider({
+    apiKey,
+    now: fixedNow,
+    requestSpacingMs: 0,
+    fetcher: async () =>
+      Response.json({
+        Information: `We have detected your API key as ${apiKey} and rate limited the request.`,
+      }),
+  }).getQuote("AAPL");
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.message.includes(apiKey), false);
+    assert.match(result.error.message, /\[REDACTED\]/);
+  }
+});
+
 test("HTTP layer returns expired cache only as an explicit stale fallback", async () => {
   const cache = new MemoryProviderCache();
   await cache.set("quote:RY", {

@@ -1167,6 +1167,10 @@ function collectProviderWarnings(
       ...(bundle.estimates ? [bundle.estimates] : []),
     ],
     profileNotices,
+    [
+      getRuntimeEnv("ALPHA_VANTAGE_API_KEY"),
+      getRuntimeEnv("FMP_API_KEY"),
+    ].filter((value): value is string => Boolean(value)),
   );
 }
 

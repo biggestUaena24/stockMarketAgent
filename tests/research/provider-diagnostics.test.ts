@@ -83,3 +83,24 @@ test("request failures and stale-fallback warnings remain diagnostics", () => {
     ],
   );
 });
+
+test("provider diagnostics redact configured and recognizable secret values", () => {
+  const apiKey = "SECRETKEY123456";
+  const failedResult: ProviderResult<unknown> = {
+    ok: false,
+    error: {
+      code: "rate-limit",
+      message: `API key as ${apiKey} exceeded the limit at https://example.test?q=1&apikey=${apiKey}`,
+      retryable: true,
+    },
+    meta: metadata([]),
+  };
+
+  const diagnostics = collectProviderDiagnostics(
+    [failedResult],
+    [],
+    [apiKey],
+  );
+  assert.equal(diagnostics.join(" ").includes(apiKey), false);
+  assert.match(diagnostics[0] ?? "", /\[REDACTED\]/);
+});

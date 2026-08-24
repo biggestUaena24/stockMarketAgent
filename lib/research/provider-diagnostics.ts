@@ -1,8 +1,10 @@
 import type { ProviderResult } from "./types";
+import { redactSensitiveText } from "@/lib/secret-redaction";
 
 export function collectProviderDiagnostics(
   results: readonly ProviderResult<unknown>[],
   profileNotices: readonly string[],
+  sensitiveValues: readonly string[] = [],
 ): string[] {
   const informational = new Set(
     profileNotices.map((notice) => notice.trim()).filter(Boolean),
@@ -13,5 +15,11 @@ export function collectProviderDiagnostics(
       (warning) => !informational.has(warning.trim()),
     ),
   ]);
-  return [...new Set(diagnostics.map((item) => item.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      diagnostics
+        .map((item) => redactSensitiveText(item.trim(), sensitiveValues))
+        .filter(Boolean),
+    ),
+  ];
 }
