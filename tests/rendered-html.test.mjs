@@ -24,6 +24,7 @@ test("production bundle contains the private Cedar application", async () => {
   assert.match(bundle, /Run research now/i);
   assert.match(bundle, /Owner access only/i);
   assert.doesNotMatch(bundle, /Your site is taking shape|react-loading-skeleton/i);
+  assert.doesNotMatch(bundle, /new URL\(""\)/);
 });
 
 test("source metadata and hosting bindings are production-safe", async () => {
