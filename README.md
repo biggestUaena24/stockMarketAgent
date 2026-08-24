@@ -129,16 +129,34 @@ Actions secret named `SCHEDULER_SECRET`. Never commit it.
 2. Enter a conservative TFSA room estimate based on your own records and CRA
    information. Cedar's figure is a ledger estimate, not an official CRA
    balance.
-3. Open **Import** to upload a Wealthsimple custom holdings or activities CSV,
-   or enter each transaction in **Portfolio**.
-4. Always preview the reconciliation. Supply an as-of date and CAD-per-USD FX
-   rate where required, correct rejected rows, and only then confirm the
-   import.
+3. Choose one opening-ledger method while the ledger is empty: either import
+   one current holdings snapshot, or import complete activity history. Never
+   import a holdings snapshot plus activity covering the same period. After a
+   holdings baseline, import only activity strictly after its snapshot date.
+4. Always preview the reconciliation. Review every normalized row, supply an
+   explicit exchange where the CSV omits it, supply an as-of date and
+   CAD-per-USD FX rate where required, and correct blocked rows before import.
 5. Reconcile Cedar against Wealthsimple before relying on portfolio totals.
+   Duplicate, overlapping, and later holdings-baseline imports fail closed.
+   Any successful import or manual ledger edit clears the prior reconciliation
+   acknowledgement; inspect the saved ledger and acknowledge it again in
+   **Settings**. Split very large activity exports into at most 600 new rows per
+   import so the write and reconciliation reset stay atomic.
 6. Configure the matching provider mode and API key, then run research
    manually once. Confirm that sources, timestamps, and warnings make sense.
 7. Use the paper-trade trial before treating live candidate labels as useful
    decision support.
+
+Portfolio values use the newest saved provider quote whose symbol and currency
+match the holding. Every mark displays its source, market-data time, and
+freshness. When no compatible quote exists, Cedar explicitly falls back to the
+last ledger price. USD-to-CAD valuation uses the latest FX rate recorded in the
+ledger, so verify the live Wealthsimple value before any real order.
+
+The paper trial starts only when explicitly enabled and saved in **Settings**
+after onboarding and ledger reconciliation. Manual research runs do not start
+the trial or count toward scheduled-run reliability. Optional OpenAI
+explanations and email delivery do not affect research data quality.
 
 Wealthsimple documents how to request holdings and activities CSV files in its
 [custom statement guide](https://help.wealthsimple.com/hc/en-ca/articles/35654428540571-Request-a-custom-statement).

@@ -168,3 +168,24 @@ export interface WealthsimpleImportResult {
     rawCsvRetained: false;
   };
 }
+
+export interface LedgerImportPreviewTransaction {
+  action: string;
+  canonicalSymbol: string;
+  exchange: string;
+  quantity: number;
+  price: number;
+  currency: Currency;
+  fee: number;
+  fxRateToCad: number;
+  occurredAt: string;
+}
+
+export interface LedgerImportPreviewRow {
+  rowNumber: number;
+  importId: string;
+  sourceKind: NormalizedWealthsimpleRecord["kind"];
+  status: "ready" | "blocked";
+  transaction: LedgerImportPreviewTransaction | null;
+  issues: ImportIssue[];
+}

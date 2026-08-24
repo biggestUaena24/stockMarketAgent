@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canonicalOwnerStorageKey,
   constantTimeEqual,
   evaluateOwnerStatus,
 } from "../../lib/auth-policy";
 
 test("allows exactly the configured owner and normalizes email casing", () => {
+  assert.equal(
+    canonicalOwnerStorageKey(" Owner@Example.com "),
+    "owner@example.com",
+  );
   assert.equal(
     evaluateOwnerStatus({
       userEmail: " Owner@Example.com ",

@@ -20,25 +20,20 @@ import {
   percent,
   useApi,
 } from "@/app/lib/client";
-import type { ReportsPayload } from "@/app/lib/view-types";
 import type { getPaperPerformance } from "@/lib/paper";
+import type { PaperTrialReadiness } from "@/lib/paper-trial-readiness";
 import type { OwnerSettings } from "@/lib/settings";
 
 type PaperPayload = {
   paper: Awaited<ReturnType<typeof getPaperPerformance>>;
-};
-
-type SettingsPayload = {
+  readiness: PaperTrialReadiness;
   settings: OwnerSettings;
 };
 
 export function PaperScreen() {
   const paperApi = useApi<PaperPayload>("/api/paper");
-  const settingsApi = useApi<SettingsPayload>("/api/settings");
-  const reportsApi = useApi<ReportsPayload>("/api/reports?limit=100");
-  const loading =
-    paperApi.loading || settingsApi.loading || reportsApi.loading;
-  const error = paperApi.error ?? settingsApi.error ?? reportsApi.error;
+  const loading = paperApi.loading;
+  const error = paperApi.error;
 
   return (
     <>
@@ -56,25 +51,18 @@ export function PaperScreen() {
 
       {loading ? (
         <LoadingBlock rows={7} />
-      ) : error ||
-        !paperApi.data ||
-        !settingsApi.data ||
-        !reportsApi.data ? (
+      ) : error || !paperApi.data ? (
         <ErrorState
           message={error ?? "Paper-trial data is unavailable."}
           onRetry={() => {
-            void Promise.all([
-              paperApi.reload(),
-              settingsApi.reload(),
-              reportsApi.reload(),
-            ]);
+            void paperApi.reload();
           }}
         />
       ) : (
         <PaperContent
           paper={paperApi.data.paper}
-          settings={settingsApi.data.settings}
-          reports={reportsApi.data}
+          readiness={paperApi.data.readiness}
+          settings={paperApi.data.settings}
         />
       )}
     </>
@@ -83,34 +71,23 @@ export function PaperScreen() {
 
 function PaperContent({
   paper,
+  readiness,
   settings,
-  reports,
 }: {
   paper: PaperPayload["paper"];
+  readiness: PaperTrialReadiness;
   settings: OwnerSettings;
-  reports: ReportsPayload;
 }) {
-  const trialRuns = settings.paperTrialStartedAt
-    ? reports.reports.filter(
-        (run) =>
-          Date.parse(run.actualTime) >=
-          Date.parse(settings.paperTrialStartedAt ?? ""),
-      )
-    : [];
-  const successfulRuns = trialRuns.filter(
-    (run) => run.status === "complete" && run.errors.length === 0,
-  );
+  const unsuccessfulRuns = readiness.scheduledRuns - readiness.successfulRuns;
   const reliability =
-    trialRuns.length > 0 ? successfulRuns.length / trialRuns.length : 0;
-  const marketSessions = new Set(
-    successfulRuns.map((run) => calgaryDateKey(run.actualTime)),
-  ).size;
+    readiness.scheduledRuns > 0
+      ? readiness.successfulRuns / readiness.scheduledRuns
+      : 0;
+  const marketSessions = readiness.completedMarketSessions;
   const calendarDays = settings.paperTrialStartedAt
     ? daysSince(settings.paperTrialStartedAt)
     : 0;
-  const unresolvedFailures = trialRuns.filter(
-    (run) => run.status !== "complete" || run.errors.length > 0,
-  ).length;
+  const unresolvedFailures = readiness.unresolvedDataQualityFailures;
   const gates = [
     {
       label: "Onboarding profile complete",
@@ -150,18 +127,18 @@ function PaperContent({
     {
       label: "At least 95% scheduled-run reliability",
       detail:
-        trialRuns.length > 0
-          ? `${successfulRuns.length} of ${trialRuns.length} recorded runs completed cleanly`
+        readiness.scheduledRuns > 0
+          ? `${readiness.successfulRuns} of ${readiness.scheduledRuns} scheduled research runs completed`
           : "No trial runs recorded",
-      passed: trialRuns.length > 0 && reliability >= 0.95,
+      passed: readiness.scheduledRuns > 0 && reliability >= 0.95,
     },
     {
       label: "No unresolved data-quality failures",
       detail:
-        unresolvedFailures === 0 && trialRuns.length > 0
+        unresolvedFailures === 0 && readiness.scheduledRuns > 0
           ? "No failures in the recorded trial history"
           : `${unresolvedFailures} run${unresolvedFailures === 1 ? "" : "s"} need review`,
-      passed: unresolvedFailures === 0 && trialRuns.length > 0,
+      passed: unresolvedFailures === 0 && readiness.scheduledRuns > 0,
     },
     {
       label: "Research-label acknowledgement",
@@ -214,8 +191,8 @@ function PaperContent({
         />
         <Metric
           label="Run reliability"
-          value={trialRuns.length > 0 ? percent(reliability * 100) : "—"}
-          detail={`${successfulRuns.length} clean · ${unresolvedFailures} need review`}
+          value={readiness.scheduledRuns > 0 ? percent(reliability * 100) : "—"}
+          detail={`${readiness.successfulRuns} complete · ${unsuccessfulRuns} incomplete`}
           icon="shield"
           tone={reliability >= 0.95 ? "good" : "watch"}
         />
@@ -494,16 +471,6 @@ function daysSince(value: string): number {
   const started = Date.parse(value);
   if (!Number.isFinite(started)) return 0;
   return Math.max(0, Math.floor((Date.now() - started) / 86_400_000));
-}
-
-function calgaryDateKey(value: string): string {
-  if (!Number.isFinite(Date.parse(value))) return "invalid";
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Edmonton",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(value));
 }
 
 function humanAction(value: string): string {

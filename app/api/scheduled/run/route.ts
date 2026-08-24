@@ -1,4 +1,4 @@
-import { isValidMachineToken } from "@/lib/auth";
+import { getConfiguredOwnerEmail, isValidMachineToken } from "@/lib/auth";
 import {
   calgaryDateKey,
   scheduledIdempotencyKey,
@@ -8,7 +8,6 @@ import {
 } from "@/lib/calgary-time";
 import { errorResponse, readJson } from "@/lib/http";
 import { executeResearchRun } from "@/lib/research-runner";
-import { getRuntimeEnv } from "@/lib/runtime-env";
 
 export async function POST(request: Request) {
   if (!isValidMachineToken(request)) {
@@ -21,7 +20,7 @@ export async function POST(request: Request) {
       payload.slot === "morning" || payload.slot === "evening"
         ? payload.slot
         : slotForCalgaryTime(now);
-    const ownerEmail = getRuntimeEnv("OWNER_EMAIL");
+    const ownerEmail = getConfiguredOwnerEmail();
     if (!ownerEmail) {
       return Response.json(
         { error: "OWNER_EMAIL is not configured." },

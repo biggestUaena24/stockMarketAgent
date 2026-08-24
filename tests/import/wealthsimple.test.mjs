@@ -236,6 +236,26 @@ test("accepts a partial holdings format using safe explicit inferences", () => {
   assert.equal(result.reconciliation.holdings.missingAverageCostRows, 1);
 });
 
+test("rejects security rows with no explicit exchange or ticker suffix", () => {
+  const result = normalizeWealthsimpleCsv(
+    [
+      "Ticker,Units,Average Cost,Currency,As of Date",
+      "AAPL,2,200,USD,2026-07-23",
+    ].join("\n"),
+    { kind: "holdings" },
+  );
+
+  assert.equal(result.records.length, 0);
+  assert.equal(result.rows[0].status, "rejected");
+  assert.equal(
+    result.rows[0].issues.some(
+      (entry) =>
+        entry.severity === "error" && entry.field === "exchange",
+    ),
+    true,
+  );
+});
+
 test("accepts partial cash activity exports without security columns", () => {
   const csv = [
     "Transaction Type,Effective Date,Net Amount (CAD)",

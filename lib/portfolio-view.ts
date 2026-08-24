@@ -8,6 +8,14 @@ import {
 } from "./ledger/index";
 import type { OwnerSettings } from "./settings";
 import type { TransactionRecord } from "./transactions";
+import {
+  assessPortfolioQuoteFreshness,
+  providerDisplayName,
+  quoteKeyForHolding,
+  type PortfolioMarkFreshness,
+  type PortfolioMarkTimePrecision,
+  type SavedProviderQuote,
+} from "./portfolio-market-quote";
 
 export type PortfolioHoldingView = {
   key: string;
@@ -27,6 +35,17 @@ export type PortfolioHoldingView = {
   realizedGainCad: number;
   allocationPct: number;
   lastLedgerPriceAt: string;
+  markedPriceAt: string;
+  markedPriceTimePrecision: PortfolioMarkTimePrecision;
+  markSource: "provider" | "ledger";
+  markSourceLabel: string;
+  markSourceUrl: string | null;
+  markFreshness: PortfolioMarkFreshness;
+  markAgeMinutes: number | null;
+  markFallbackReason: string | null;
+  cadFxRate: number;
+  cadFxSourceLabel: string;
+  cadFxAt: string;
 };
 
 export type PortfolioView = {
@@ -43,11 +62,17 @@ export type PortfolioView = {
   };
   errors: string[];
   valuationLabel: string;
+  providerQuoteCount: number;
+  freshProviderQuoteCount: number;
+  staleProviderQuoteCount: number;
+  ledgerFallbackCount: number;
 };
 
 export function buildPortfolioView(
   records: TransactionRecord[],
   settings: OwnerSettings,
+  savedQuotes: readonly SavedProviderQuote[] = [],
+  now = new Date(),
 ): PortfolioView {
   const ordered = [...records].sort(
     (left, right) =>
@@ -64,6 +89,9 @@ export function buildPortfolioView(
     string,
     { price: number; fx: number; occurredAt: string }
   >();
+  const quotesBySymbol = new Map(
+    savedQuotes.map((quote) => [quote.canonicalSymbol, quote]),
+  );
   let explicitFeesCad = 0;
 
   for (const record of ordered) {
@@ -96,7 +124,7 @@ export function buildPortfolioView(
   const provisional = Object.entries(state.positions)
     .filter(([, position]) => position.quantity > 0)
     .map(([key, position]) => {
-      const mark = latestMarks.get(key) ?? {
+      const ledgerMark = latestMarks.get(key) ?? {
         price: position.averageCostNative,
         fx:
           position.security.currency === "CAD"
@@ -104,6 +132,44 @@ export function buildPortfolioView(
             : position.averageCostCad / Math.max(position.averageCostNative, 0.01),
         occurredAt: ordered.at(-1)?.occurredAt ?? new Date(0).toISOString(),
       };
+      const savedQuote = quotesBySymbol.get(
+        quoteKeyForHolding(position.security),
+      );
+      const usableQuote =
+        savedQuote?.currency === position.security.currency
+          ? savedQuote
+          : null;
+      const quoteFreshness = usableQuote
+        ? assessPortfolioQuoteFreshness(usableQuote, now)
+        : null;
+      const mark = usableQuote
+        ? {
+            price: usableQuote.priceNative,
+            fx: ledgerMark.fx,
+            occurredAt: usableQuote.asOf,
+            timePrecision:
+              usableQuote.provider === "alpha-vantage"
+                ? ("market-date" as const)
+                : ("timestamp" as const),
+            source: "provider" as const,
+            sourceLabel: providerDisplayName(usableQuote.provider),
+            sourceUrl: usableQuote.sourceUrl || null,
+            freshness: quoteFreshness?.freshness ?? ("stale" as const),
+            ageMinutes: quoteFreshness?.ageMinutes ?? null,
+            fallbackReason: null,
+          }
+        : {
+            ...ledgerMark,
+            timePrecision: "ledger-time" as const,
+            source: "ledger" as const,
+            sourceLabel: "Ledger price fallback",
+            sourceUrl: null,
+            freshness: "ledger-fallback" as const,
+            ageMinutes: null,
+            fallbackReason: savedQuote
+              ? `The saved provider quote is ${savedQuote.currency}, but this ledger position is ${position.security.currency}.`
+              : "No saved provider quote matched this holding.",
+          };
       const valuation = valuePosition(
         position,
         {
@@ -114,14 +180,14 @@ export function buildPortfolioView(
         },
         state.config,
       );
-      return { key, position, mark, valuation };
+      return { key, position, mark, ledgerMark, valuation };
     });
   const totalLiquidation = provisional.reduce(
     (sum, item) => sum + item.valuation.estimatedLiquidationValueCad,
     0,
   );
   const holdings = provisional
-    .map(({ key, position, mark, valuation }) => ({
+    .map(({ key, position, mark, ledgerMark, valuation }) => ({
       key,
       symbol: position.security.symbol,
       exchange: position.security.exchange,
@@ -141,7 +207,21 @@ export function buildPortfolioView(
         totalLiquidation > 0
           ? round((valuation.estimatedLiquidationValueCad / totalLiquidation) * 100)
           : 0,
-      lastLedgerPriceAt: mark.occurredAt,
+      lastLedgerPriceAt: ledgerMark.occurredAt,
+      markedPriceAt: mark.occurredAt,
+      markedPriceTimePrecision: mark.timePrecision,
+      markSource: mark.source,
+      markSourceLabel: mark.sourceLabel,
+      markSourceUrl: mark.sourceUrl,
+      markFreshness: mark.freshness,
+      markAgeMinutes: mark.ageMinutes,
+      markFallbackReason: mark.fallbackReason,
+      cadFxRate: position.security.currency === "CAD" ? 1 : ledgerMark.fx,
+      cadFxSourceLabel:
+        position.security.currency === "CAD"
+          ? "CAD base currency"
+          : "Latest recorded ledger FX rate",
+      cadFxAt: ledgerMark.occurredAt,
     }))
     .sort((left, right) => right.markedValueCad - left.markedValueCad);
 
@@ -155,6 +235,16 @@ export function buildPortfolioView(
       0,
     ),
   );
+  const providerQuoteCount = holdings.filter(
+    (holding) => holding.markSource === "provider",
+  ).length;
+  const freshProviderQuoteCount = holdings.filter(
+    (holding) => holding.markFreshness === "fresh",
+  ).length;
+  const staleProviderQuoteCount = holdings.filter(
+    (holding) => holding.markFreshness === "stale",
+  ).length;
+  const ledgerFallbackCount = holdings.length - providerQuoteCount;
 
   return {
     holdings,
@@ -172,9 +262,37 @@ export function buildPortfolioView(
       explicitFeesCad: round(explicitFeesCad),
     },
     errors,
-    valuationLabel:
-      "Uses the latest price recorded in your ledger—not a current market quote.",
+    valuationLabel: valuationLabel(
+      holdings.length,
+      freshProviderQuoteCount,
+      staleProviderQuoteCount,
+      ledgerFallbackCount,
+    ),
+    providerQuoteCount,
+    freshProviderQuoteCount,
+    staleProviderQuoteCount,
+    ledgerFallbackCount,
   };
+}
+
+function valuationLabel(
+  holdingsCount: number,
+  freshProviderQuoteCount: number,
+  staleProviderQuoteCount: number,
+  ledgerFallbackCount: number,
+): string {
+  if (holdingsCount === 0) {
+    return "No open holdings are available to value.";
+  }
+  const counts = `${freshProviderQuoteCount} fresh provider ${pluralize("quote", freshProviderQuoteCount)}, ${staleProviderQuoteCount} stale provider ${pluralize("quote", staleProviderQuoteCount)}, and ${ledgerFallbackCount} ledger-price ${pluralize("fallback", ledgerFallbackCount)}`;
+  if (staleProviderQuoteCount === 0 && ledgerFallbackCount === 0) {
+    return `Estimated from ${counts}. “Fresh” means within the configured provider window, not necessarily live.`;
+  }
+  return `Estimated from ${counts} across ${holdingsCount} ${pluralize("holding", holdingsCount)}. This is not a fully current market valuation.`;
+}
+
+function pluralize(noun: string, count: number): string {
+  return count === 1 ? noun : `${noun}s`;
 }
 
 function toLedgerTransaction(

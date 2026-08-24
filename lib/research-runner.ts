@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getReadyDb } from "@/db";
 import {
   evidence as evidenceTable,
@@ -26,6 +26,7 @@ import {
   recordPaperObservation,
   settleQueuedPaperTrades,
 } from "@/lib/paper";
+import { getPaperTrialReadiness } from "@/lib/paper-trial-readiness";
 import { buildPortfolioView } from "@/lib/portfolio-view";
 import {
   ALPHA_VANTAGE_TRIAL_PROFILE,
@@ -34,12 +35,17 @@ import {
   FmpFullProvider,
   FULL_RESEARCH_FRESHNESS_POLICY,
   TRIAL_RESEARCH_FRESHNESS_POLICY,
+  assessResearchRunQuality,
   assessEvidenceQuality,
   assessSafetyUniverse,
+  authoritativeFilingReference,
   calculateWeightedResearchScore,
+  collectProviderDiagnostics,
   decideResearchAction,
   evaluateOperationalReadiness,
+  researchSymbolForHolding,
   selectResearchSymbols,
+  symbolForProvider,
   type FactorEvidence,
   type GateAssessment,
   type MarketResearchProvider,
@@ -51,11 +57,7 @@ import {
   type ResearchArtifact,
   type ResearchFactors,
 } from "@/lib/research";
-import {
-  getOrCreateSettings,
-  updateOwnerSettings,
-  type OwnerSettings,
-} from "@/lib/settings";
+import { getOrCreateSettings, type OwnerSettings } from "@/lib/settings";
 import { listTransactions } from "@/lib/transactions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 
@@ -138,20 +140,18 @@ export async function executeResearchRun(
   const now = new Date();
   const runId = newId("run");
   const settings = await getOrCreateSettings(request.ownerEmail);
-  if (!settings.paperTrialStartedAt) {
-    await updateOwnerSettings(request.ownerEmail, {
-      paperTrialStartedAt: now.toISOString(),
-    });
-    settings.paperTrialStartedAt = now.toISOString();
-  }
   const provider = providerFor(settings);
+  const modelVersion = getRuntimeEnv("OPENAI_API_KEY")
+    ? RESEARCH_MODEL
+    : "deterministic-fallback";
   const transactions = await listTransactions(request.ownerEmail, 2_000);
   const portfolio = buildPortfolioView(transactions, settings);
   const localDate = calgaryDateKey(now);
   const calendar = marketCalendarState(localDate);
   const requestedSymbols = collectSymbols(settings, portfolio.holdings);
   const selection = selectResearchSymbols(requestedSymbols, provider.profile);
-  const errors = [...selection.reasons, ...portfolio.errors];
+  const researchErrors = [...selection.reasons];
+  const errors = [...researchErrors, ...portfolio.errors];
   const actualTime = now.toISOString();
   const scheduledTime =
     request.scheduledTime ?? scheduledTimeUtc(now, request.slot);
@@ -166,7 +166,7 @@ export async function executeResearchRun(
     status: "running",
     dataFreshness: "unknown",
     providerVersion: `${provider.profile.id}:${provider.profile.mode}`,
-    modelVersion: RESEARCH_MODEL,
+    modelVersion,
     marketStateJson: JSON.stringify(calendar),
     reportJson: JSON.stringify({
       focus:
@@ -194,29 +194,60 @@ export async function executeResearchRun(
       });
       recommendationCount += 1;
       if (outcome.insufficient) blockedByData += 1;
+      researchErrors.push(...outcome.warnings);
       errors.push(...outcome.warnings);
     } catch (error) {
       blockedByData += 1;
-      errors.push(
-        `${symbol}: ${
-          error instanceof Error ? error.message : "research failed"
-        }`,
-      );
+      const diagnostic = `${symbol}: ${
+        error instanceof Error ? error.message : "research failed"
+      }`;
+      researchErrors.push(diagnostic);
+      errors.push(diagnostic);
     }
   }
 
-  const noConfiguredData =
-    !providerKeyConfigured(settings.providerMode) ||
-    selection.accepted.length === 0;
-  const status =
-    noConfiguredData ||
-    recommendationCount === 0 ||
-    blockedByData === recommendationCount
-      ? "degraded"
-      : "complete";
+  const runQuality = assessResearchRunQuality({
+    providerConfigured: providerKeyConfigured(settings.providerMode),
+    acceptedSymbolCount: selection.accepted.length,
+    recommendationCount,
+    blockedByDataCount: blockedByData,
+    researchDiagnostics: unique(researchErrors),
+    portfolioDiagnostics: portfolio.errors,
+  });
+  const { status, dataFreshness } = runQuality;
   const completedAt = new Date().toISOString();
-  const dataFreshness =
-    status === "complete" && blockedByData === 0 ? "verified" : "limited";
+  let notification: {
+    status: string;
+    reason?: string;
+    providerMessageId?: string | null;
+  } =
+    request.trigger === "scheduled"
+      ? {
+          status: "pending",
+          reason: "The scheduled-run notification has not been attempted yet.",
+        }
+      : {
+          status: "not-requested",
+          reason: "Manual research runs do not send an email notification.",
+        };
+  const reportSummary = {
+    focus:
+      request.slot === "morning"
+        ? "Prior-close and overnight evidence; expect opening volatility."
+        : "Completed-session review and preparation for the next session.",
+    marketCalendar: calendar,
+    researchedSymbols: selection.accepted,
+    rejectedSymbols: selection.rejected,
+    provider: provider.profile.displayName,
+    providerWarnings: provider.profile.warnings,
+    researchOnly:
+      settings.providerMode === "trial" ||
+      !settings.liveLabelsAcknowledged ||
+      !settings.quoteEntitlementVerified ||
+      portfolio.errors.length > 0,
+    execution: "Manual Wealthsimple trade only",
+    notification,
+  };
 
   await db
     .update(researchRuns)
@@ -224,35 +255,25 @@ export async function executeResearchRun(
       status,
       dataFreshness,
       errorsJson: JSON.stringify(unique(errors)),
-      reportJson: JSON.stringify({
-        focus:
-          request.slot === "morning"
-            ? "Prior-close and overnight evidence; expect opening volatility."
-            : "Completed-session review and preparation for the next session.",
-        marketCalendar: calendar,
-        researchedSymbols: selection.accepted,
-        rejectedSymbols: selection.rejected,
-        provider: provider.profile.displayName,
-        providerWarnings: provider.profile.warnings,
-        researchOnly:
-          settings.providerMode === "trial" ||
-          !settings.liveLabelsAcknowledged ||
-          !settings.quoteEntitlementVerified,
-        execution: "Manual Wealthsimple trade only",
-      }),
+      reportJson: JSON.stringify(reportSummary),
       completedAt,
     })
     .where(eq(researchRuns.id, runId));
 
   if (request.trigger === "scheduled") {
     const delivery = await sendResearchRunEmail(request.ownerEmail, runId);
+    notification = delivery;
+    reportSummary.notification = notification;
     if (delivery.status === "failed") {
       errors.push(`Email delivery: ${delivery.reason}`);
-      await db
-        .update(researchRuns)
-        .set({ errorsJson: JSON.stringify(unique(errors)) })
-        .where(eq(researchRuns.id, runId));
     }
+    await db
+      .update(researchRuns)
+      .set({
+        errorsJson: JSON.stringify(unique(errors)),
+        reportJson: JSON.stringify(reportSummary),
+      })
+      .where(eq(researchRuns.id, runId));
   }
 
   return {
@@ -291,7 +312,10 @@ async function researchOne(input: {
     input.provider.getNews(providerSymbol, { limit: 12 }),
   ]);
   const bundle: ProviderBundle = { quote, facts, estimates, news };
-  const warnings = collectProviderWarnings(bundle);
+  const warnings = collectProviderWarnings(
+    bundle,
+    input.provider.profile.warnings,
+  );
   const persistedEvidence = await buildAndPersistEvidence({
     ownerEmail: input.ownerEmail,
     runId: input.runId,
@@ -319,11 +343,11 @@ async function researchOne(input: {
     settings: input.settings,
     holding: ownedHolding,
     bundle,
+    portfolioDiagnostics: input.portfolio.errors,
   });
   const paperTrial = await paperTrialRecord(
     input.ownerEmail,
     input.settings,
-    input.now,
   );
   const operationalReadiness = evaluateOperationalReadiness({
     provider: input.provider.profile,
@@ -426,7 +450,7 @@ async function researchOne(input: {
     dataAsOf,
     researchOnly: !decision.liveLabelEligible,
   });
-  if (quoteData?.currency === "CAD") {
+  if (input.settings.paperTrialStartedAt && quoteData?.currency === "CAD") {
     await settleQueuedPaperTrades({
       ownerEmail: input.ownerEmail,
       symbol: input.symbol,
@@ -466,7 +490,7 @@ async function researchOne(input: {
         feesCad: 0,
       });
     }
-  } else if (quoteData) {
+  } else if (input.settings.paperTrialStartedAt && quoteData) {
     warnings.push(
       `Paper tracking skipped for ${input.symbol}: the provider did not supply an evidence-backed CAD conversion rate for the ${quoteData.currency ?? "unverified-currency"} quote.`,
     );
@@ -504,25 +528,9 @@ function collectSymbols(
   holdings: ReturnType<typeof buildPortfolioView>["holdings"],
 ): string[] {
   return unique([
-    ...holdings.map((holding) =>
-      holding.exchange === "TSX"
-        ? `${holding.symbol.replace(/\.TO$/i, "")}.TO`
-        : holding.symbol,
-    ),
+    ...holdings.map(researchSymbolForHolding),
     ...settings.watchlist,
   ]);
-}
-
-function symbolForProvider(
-  canonical: string,
-  provider: string,
-): string {
-  const symbol = canonical.toUpperCase();
-  if (provider === "alpha-vantage") {
-    if (symbol.endsWith(".TO")) return `${symbol.slice(0, -3)}.TRT`;
-    if (symbol.endsWith(".V")) return `${symbol.slice(0, -2)}.TRV`;
-  }
-  return symbol;
 }
 
 async function buildAndPersistEvidence(input: {
@@ -565,6 +573,10 @@ async function buildAndPersistEvidence(input: {
   }
   if (input.bundle.facts.ok) {
     const value = input.bundle.facts.data;
+    const filingReference = authoritativeFilingReference(
+      value.exchange,
+      input.symbol,
+    );
     records.push({
       symbol: input.symbol,
       sourceUrl: input.bundle.facts.meta.endpoint || providerUrl,
@@ -598,18 +610,14 @@ async function buildAndPersistEvidence(input: {
     });
     records.push({
       symbol: input.symbol,
-      sourceUrl: filingUrl(value.exchange, input.symbol),
+      sourceUrl: filingReference.sourceUrl,
       category: "filing-reference",
       publicationTime: null,
       marketDataTime: value.asOf,
-      facts: [
-        value.exchange === "TSX"
-          ? "Use SEDAR+ as the authoritative Canadian filing reference."
-          : "Use SEC EDGAR as the authoritative United States filing reference.",
-      ],
+      facts: [filingReference.fact],
       sentiment: null,
       freshness: "reference",
-      provider: value.exchange === "TSX" ? "SEDAR+" : "SEC EDGAR",
+      provider: filingReference.provider,
     });
   }
   if (input.bundle.estimates?.ok) {
@@ -906,8 +914,16 @@ function buildPortfolioRiskGate(input: {
   settings: OwnerSettings;
   holding: ReturnType<typeof buildPortfolioView>["holdings"][number] | null;
   bundle: ProviderBundle;
+  portfolioDiagnostics: readonly string[];
 }): GateAssessment {
   const reasons: Array<{ code: string; message: string }> = [];
+  if (input.portfolioDiagnostics.length > 0) {
+    reasons.push({
+      code: "portfolio-data-invalid",
+      message:
+        "The portfolio ledger has unresolved calculation diagnostics, so live labels are disabled.",
+    });
+  }
   if (!input.settings.emergencyFundConfirmed) {
     reasons.push({
       code: "emergency-fund-not-confirmed",
@@ -948,6 +964,7 @@ function buildPortfolioRiskGate(input: {
   return {
     status: reasons.some((item) =>
       [
+        "portfolio-data-invalid",
         "emergency-fund-not-confirmed",
         "single-stock-cap-exceeded",
         "no-available-cash",
@@ -1027,42 +1044,14 @@ function conflictObservations(bundle: ProviderBundle) {
 async function paperTrialRecord(
   ownerEmail: string,
   settings: OwnerSettings,
-  now: Date,
 ) {
-  const db = await getReadyDb();
-  const rows = await db
-    .select()
-    .from(researchRuns)
-    .where(eq(researchRuns.ownerEmail, ownerEmail))
-    .orderBy(asc(researchRuns.actualTime))
-    .limit(500);
-  const scheduled = rows.filter((row) =>
-    /^\d{4}-\d{2}-\d{2}:(morning|evening)$/.test(row.idempotencyKey),
-  );
-  const successful = scheduled.filter((row) => row.status === "complete");
-  const sessions = new Set(
-    successful.flatMap((row) => {
-      try {
-        const state = JSON.parse(row.marketStateJson) as {
-          localDate?: string;
-          anyOpen?: boolean;
-        };
-        return state.anyOpen && state.localDate ? [state.localDate] : [];
-      } catch {
-        return [];
-      }
-    }),
+  const readiness = await getPaperTrialReadiness(
+    ownerEmail,
+    settings.paperTrialStartedAt,
   );
   return {
-    startedOn:
-      settings.paperTrialStartedAt ?? now.toISOString(),
-    completedMarketSessions: sessions.size,
-    scheduledRuns: scheduled.length,
-    successfulRuns: successful.length,
+    ...readiness,
     reconciliationPassed: Boolean(settings.ledgerReconciledAt),
-    unresolvedDataQualityFailures: rows.filter(
-      (row) => row.status === "degraded",
-    ).length,
   };
 }
 
@@ -1166,27 +1155,19 @@ function portfolioImpact(
   return `Current tracked allocation is ${round2(currentAllocation)}%. Individual stocks share a ${settings.individualStocksMaxPct}% sleeve and one stock is capped at ${settings.singleStockMaxPct}%.`;
 }
 
-function collectProviderWarnings(bundle: ProviderBundle): string[] {
-  return unique(
+function collectProviderWarnings(
+  bundle: ProviderBundle,
+  profileNotices: readonly string[],
+): string[] {
+  return collectProviderDiagnostics(
     [
       bundle.quote,
       bundle.facts,
       bundle.news,
       ...(bundle.estimates ? [bundle.estimates] : []),
-    ].flatMap((result) =>
-      result.ok
-        ? result.meta.warnings
-        : [result.error.message, ...result.meta.warnings],
-    ),
+    ],
+    profileNotices,
   );
-}
-
-function filingUrl(exchange: string, symbol: string): string {
-  return exchange === "TSX"
-    ? "https://www.sedarplus.ca/"
-    : `https://www.sec.gov/edgar/search/#/q=${encodeURIComponent(
-        baseSymbol(symbol),
-      )}`;
 }
 
 function findHolding(

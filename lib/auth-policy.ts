@@ -8,6 +8,14 @@ export function normalizeEmail(value: string): string {
   return value.trim().toLocaleLowerCase("en-CA");
 }
 
+export function canonicalOwnerStorageKey(
+  configuredOwnerEmail: string | null | undefined,
+): string | null {
+  if (!configuredOwnerEmail) return null;
+  const normalized = normalizeEmail(configuredOwnerEmail);
+  return normalized || null;
+}
+
 export function evaluateOwnerStatus(input: {
   userEmail: string | null;
   configuredOwnerEmail: string | null;

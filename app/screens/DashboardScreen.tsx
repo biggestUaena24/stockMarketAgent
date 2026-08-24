@@ -18,11 +18,13 @@ import {
   actionTone,
   apiRequest,
   dateTime,
+  marketDataTime,
   money,
   percent,
   useApi,
 } from "@/app/lib/client";
 import type { DashboardPayload } from "@/app/lib/view-types";
+import { requiredResearchSetupReady } from "@/lib/research/setup-readiness";
 
 export function DashboardScreen() {
   const { data, error, loading, reload } =
@@ -99,11 +101,13 @@ export function DashboardScreen() {
 
 function DashboardContent({ data }: { data: DashboardPayload }) {
   const latest = data.reports[0];
-  const setupReady =
-    data.settings.onboardingComplete &&
-    data.configuration.alphaVantage &&
-    data.configuration.openai &&
-    data.configuration.schedulerSecret;
+  const setupReady = requiredResearchSetupReady({
+    onboardingComplete: data.settings.onboardingComplete,
+    providerMode: data.settings.providerMode,
+    alphaVantageConfigured: data.configuration.alphaVantage,
+    fmpConfigured: data.configuration.fmp,
+    schedulerSecretConfigured: data.configuration.schedulerSecret,
+  });
   const lastResearch =
     latest?.completedAt ?? latest?.actualTime ?? null;
 
@@ -282,6 +286,31 @@ function DashboardContent({ data }: { data: DashboardPayload }) {
                       })}{" "}
                       shares
                     </span>
+                    <span>
+                      {holding.markSourceUrl ? (
+                        <a
+                          className="inline-link"
+                          href={holding.markSourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {holding.markSourceLabel}
+                        </a>
+                      ) : (
+                        holding.markSourceLabel
+                      )}{" "}
+                      ·{" "}
+                      {marketDataTime(
+                        holding.markedPriceAt,
+                        holding.markedPriceTimePrecision,
+                      )}{" "}
+                      ·{" "}
+                      {holding.markFreshness === "fresh"
+                        ? "fresh"
+                        : holding.markFreshness === "stale"
+                          ? "stale"
+                          : "not a market quote"}
+                    </span>
                   </div>
                   <div className="allocation-track" aria-label={`${holding.allocationPct}% allocation`}>
                     <span style={{ width: `${Math.min(100, holding.allocationPct)}%` }} />
@@ -352,9 +381,7 @@ function DashboardContent({ data }: { data: DashboardPayload }) {
         </Card>
       </div>
 
-      {!setupReady ? (
-        <SetupStrip data={data} />
-      ) : null}
+      <SetupStrip data={data} requiredReady={setupReady} />
 
       <Notice title="TFSA room is an estimate, not a live CRA balance" tone="quiet">
         <p>
@@ -385,21 +412,41 @@ function ReadinessRow({
   );
 }
 
-function SetupStrip({ data }: { data: DashboardPayload }) {
+function SetupStrip({
+  data,
+  requiredReady,
+}: {
+  data: DashboardPayload;
+  requiredReady: boolean;
+}) {
+  const provider: readonly [string, boolean] =
+    data.settings.providerMode === "full"
+      ? ["FMP market data · required", data.configuration.fmp]
+      : ["Alpha Vantage market data · required", data.configuration.alphaVantage];
+  const emailReady =
+    data.configuration.resend && data.configuration.notificationEmail;
   const checks = [
-    ["Alpha Vantage", data.configuration.alphaVantage],
-    ["OpenAI", data.configuration.openai],
-    ["Scheduler", data.configuration.schedulerSecret],
-    ["Email", data.configuration.resend && data.configuration.notificationEmail],
+    provider,
+    ["Scheduler protection · required", data.configuration.schedulerSecret],
+    [
+      `OpenAI explanations · optional ${data.configuration.openai ? "on" : "off"}`,
+      data.configuration.openai,
+    ],
+    [`Email notifications · optional ${emailReady ? "on" : "off"}`, emailReady],
   ] as const;
   return (
     <Card className="setup-strip">
       <div>
-        <p className="eyebrow">Initial setup</p>
-        <h2>Connect the research services</h2>
+        <p className="eyebrow">Service status</p>
+        <h2>
+          {requiredReady
+            ? "Required research setup is ready"
+            : "Finish the required research setup"}
+        </h2>
         <p>
-          Keys stay in the hosted secret store—never in your browser, CSV, or
-          database.
+          Market data, completed onboarding, and scheduler protection are
+          required. OpenAI wording and email notifications are optional and do
+          not block research readiness.
         </p>
       </div>
       <div className="setup-checks">
@@ -411,7 +458,7 @@ function SetupStrip({ data }: { data: DashboardPayload }) {
         ))}
       </div>
       <Link className="button button-secondary" href="/settings">
-        Open setup
+        Review setup
       </Link>
     </Card>
   );

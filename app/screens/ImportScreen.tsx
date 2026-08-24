@@ -15,6 +15,7 @@ import {
 import { apiRequest, dateTime, money, useApi } from "@/app/lib/client";
 import type {
   ImportIssue,
+  LedgerImportPreviewRow,
   ReconciliationSummary,
   WealthsimpleImportResult,
 } from "@/lib/import";
@@ -23,6 +24,8 @@ type ImportPreview = {
   mode: "preview" | "commit";
   result: WealthsimpleImportResult;
   serverIssues: ImportIssue[];
+  previewRows: LedgerImportPreviewRow[];
+  previewFingerprint: string;
   importableRows?: number;
   insertedRows?: number;
   duplicateRows?: number;
@@ -49,17 +52,18 @@ export function ImportScreen() {
   const [kind, setKind] = useState<"auto" | "holdings" | "activities">("auto");
   const [defaultDate, setDefaultDate] = useState(today());
   const [defaultFxRate, setDefaultFxRate] = useState("1.35");
+  const [defaultExchange, setDefaultExchange] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [allowPartial, setAllowPartial] = useState(false);
-  const [reconciled, setReconciled] = useState(false);
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected);
     setPreview(null);
     setMessage(null);
+    setAllowPartial(false);
   }
 
   async function submitPreview(event: FormEvent) {
@@ -70,6 +74,7 @@ export function ImportScreen() {
     }
     setWorking(true);
     setMessage(null);
+    setAllowPartial(false);
     try {
       const payload = await upload("preview");
       setPreview(payload);
@@ -92,14 +97,10 @@ export function ImportScreen() {
     try {
       const payload = await upload("commit");
       setPreview(payload);
-      if (reconciled) {
-        await apiRequest("/api/settings", {
-          method: "PATCH",
-          body: JSON.stringify({ ledgerReconciledAt: new Date().toISOString() }),
-        });
-      }
       setMessage(
-        `${payload.insertedRows ?? 0} rows imported. The original CSV was discarded.`,
+        (payload.insertedRows ?? 0) > 0
+          ? `${payload.insertedRows} rows imported. Reconciliation was cleared; verify the saved ledger, then acknowledge it again in Settings. The original CSV was discarded.`
+          : "No new rows were imported, so reconciliation was unchanged. The original CSV was discarded.",
       );
       await batches.reload();
     } catch (caught) {
@@ -115,11 +116,12 @@ export function ImportScreen() {
     form.append("mode", mode);
     form.append("kind", kind);
     form.append("defaultDate", defaultDate);
-    form.append("defaultExchange", "TSX");
+    if (defaultExchange) form.append("defaultExchange", defaultExchange);
     form.append("defaultFxRate", defaultFxRate);
     if (mode === "commit") {
       form.append("confirm", "IMPORT_REVIEWED");
       form.append("allowPartial", String(allowPartial));
+      form.append("previewFingerprint", preview!.previewFingerprint);
     }
     return apiRequest<ImportPreview>("/api/imports", {
       method: "POST",
@@ -185,11 +187,12 @@ export function ImportScreen() {
                 <span>File type</span>
                 <select
                   value={kind}
-                  onChange={(event) =>
+                  onChange={(event) => {
                     setKind(
                       event.target.value as "auto" | "holdings" | "activities",
-                    )
-                  }
+                    );
+                    setPreview(null);
+                  }}
                 >
                   <option value="auto">Detect automatically</option>
                   <option value="holdings">Holdings snapshot</option>
@@ -197,13 +200,40 @@ export function ImportScreen() {
                 </select>
               </label>
               <label className="field">
-                <span>Default / snapshot date</span>
+                <span>Holdings snapshot date</span>
                 <input
                   type="date"
                   value={defaultDate}
-                  onChange={(event) => setDefaultDate(event.target.value)}
+                  onChange={(event) => {
+                    setDefaultDate(event.target.value);
+                    setPreview(null);
+                  }}
                   required
                 />
+                <small>
+                  Activity rows must contain their own dates; this fallback is
+                  used only for holdings snapshots.
+                </small>
+              </label>
+              <label className="field">
+                <span>Fallback exchange</span>
+                <select
+                  value={defaultExchange}
+                  onChange={(event) => {
+                    setDefaultExchange(event.target.value);
+                    setPreview(null);
+                  }}
+                >
+                  <option value="">No fallback — require CSV value</option>
+                  <option value="TSX">TSX</option>
+                  <option value="TSXV">TSX Venture</option>
+                  <option value="NASDAQ">Nasdaq</option>
+                  <option value="NYSE">NYSE</option>
+                </select>
+                <small>
+                  Select only when every missing exchange in this file belongs to
+                  the same market.
+                </small>
               </label>
               <label className="field">
                 <span>Fallback CAD per USD</span>
@@ -212,7 +242,10 @@ export function ImportScreen() {
                   min="0.01"
                   step="0.000001"
                   value={defaultFxRate}
-                  onChange={(event) => setDefaultFxRate(event.target.value)}
+                  onChange={(event) => {
+                    setDefaultFxRate(event.target.value);
+                    setPreview(null);
+                  }}
                   required
                 />
                 <small>Used only when a USD row has no FX rate.</small>
@@ -270,7 +303,10 @@ export function ImportScreen() {
               <span>4</span>
               <div>
                 <strong>Confirm reconciliation</strong>
-                <p>Only then mark the ledger as reconciled.</p>
+                <p>
+                  After import, inspect the saved ledger and acknowledge it in
+                  Settings.
+                </p>
               </div>
             </li>
           </ol>
@@ -300,6 +336,99 @@ export function ImportScreen() {
             />
             <Reconciliation summary={preview.result.reconciliation} />
 
+            <div className="section-heading-row">
+              <div>
+                <h3>Normalized ledger rows</h3>
+                <p>
+                  Review the exact action, security, currency, date, price, fee,
+                  and FX rate that Cedar will save. Blocked rows are never added.
+                </p>
+              </div>
+              <Badge tone="info">
+                {preview.previewRows.filter((row) => row.status === "ready").length}{" "}
+                ready
+              </Badge>
+            </div>
+            {preview.previewRows.length ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>CSV row</th>
+                      <th>Status</th>
+                      <th>Action</th>
+                      <th>Security</th>
+                      <th>Date</th>
+                      <th className="number">Quantity</th>
+                      <th className="number">Price / amount</th>
+                      <th className="number">Fee</th>
+                      <th className="number">FX to CAD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.previewRows.map((row) => {
+                      const transaction = row.transaction;
+                      return (
+                        <tr key={`${row.importId}-${row.rowNumber}`}>
+                          <td>{row.rowNumber}</td>
+                          <td>
+                            <Badge tone={row.status === "ready" ? "good" : "risk"}>
+                              {row.status === "ready" ? "Ready" : "Blocked"}
+                            </Badge>
+                          </td>
+                          <td>{transaction?.action ?? "Needs correction"}</td>
+                          <td>
+                            <strong>
+                              {transaction?.canonicalSymbol ?? "Not ledger-ready"}
+                            </strong>
+                            <span className="cell-subtitle">
+                              {transaction
+                                ? `${transaction.exchange} · ${transaction.currency}`
+                                : row.sourceKind}
+                            </span>
+                          </td>
+                          <td>
+                            {transaction
+                              ? dateTime(transaction.occurredAt)
+                              : "—"}
+                          </td>
+                          <td className="number">
+                            {transaction
+                              ? transaction.quantity.toLocaleString("en-CA", {
+                                  maximumFractionDigits: 8,
+                                })
+                              : "—"}
+                          </td>
+                          <td className="number">
+                            {transaction
+                              ? money(transaction.price, transaction.currency)
+                              : "—"}
+                          </td>
+                          <td className="number">
+                            {transaction
+                              ? money(transaction.fee, transaction.currency)
+                              : "—"}
+                          </td>
+                          <td className="number">
+                            {transaction
+                              ? transaction.fxRateToCad.toFixed(6)
+                              : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <Notice title="No new normalized rows" tone="warning" icon="warning">
+                <p>
+                  Every row was rejected or already exists. Nothing can be
+                  committed from this preview.
+                </p>
+              </Notice>
+            )}
+
             {issues.length ? (
               <div className="issue-list">
                 {issues.slice(0, 30).map((issue, index) => (
@@ -314,7 +443,8 @@ export function ImportScreen() {
                     />
                     <div>
                       <strong>
-                        Row {issue.rowNumber} · {issue.code.replaceAll("_", " ")}
+                        {issue.rowNumber > 0 ? `Row ${issue.rowNumber}` : "Import-wide"}{" "}
+                        · {issue.code.replaceAll("_", " ")}
                       </strong>
                       <span>{issue.message}</span>
                     </div>
@@ -341,22 +471,25 @@ export function ImportScreen() {
                   </span>
                 </label>
               ) : null}
-              <label className="checkbox-field">
-                <input
-                  type="checkbox"
-                  checked={reconciled}
-                  onChange={(event) => setReconciled(event.target.checked)}
-                />
-                <span>
-                  I compared the preview with Wealthsimple and want to mark the
-                  ledger reconciled.
-                </span>
-              </label>
+              <Notice
+                title="A successful import clears reconciliation"
+                tone="quiet"
+                icon="shield"
+              >
+                <p>
+                  Commit first, inspect the resulting ledger against
+                  Wealthsimple, then record a fresh acknowledgement in Settings.
+                </p>
+              </Notice>
               <button
                 className="button button-primary"
                 type="button"
                 onClick={commit}
-                disabled={working || (blocking.length > 0 && !allowPartial)}
+                disabled={
+                  working ||
+                  (preview.importableRows ?? 0) === 0 ||
+                  (blocking.length > 0 && !allowPartial)
+                }
               >
                 <Icon name="check" width={17} height={17} />
                 {working ? "Importing…" : "Confirm normalized import"}

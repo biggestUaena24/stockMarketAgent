@@ -244,6 +244,16 @@ function ReportOverview({ report }: { report: ResearchRunView }) {
     "researchedSymbols",
   );
   const execution = recordString(report.summary, "execution");
+  const notification = recordObject(report.summary, "notification");
+  const notificationStatus = notification
+    ? recordString(notification, "status")
+    : null;
+  const notificationReason = notification
+    ? recordString(notification, "reason")
+    : null;
+  const researchDiagnostics = report.errors.filter(
+    (item) => !item.startsWith("Email delivery:"),
+  );
 
   return (
     <Card>
@@ -310,22 +320,37 @@ function ReportOverview({ report }: { report: ResearchRunView }) {
         </div>
       ) : null}
 
-      {report.errors.length ? (
+      {notificationStatus ? (
         <Notice
-          title={`${report.errors.length} run diagnostic${
-            report.errors.length === 1 ? "" : "s"
+          title={notificationTitle(notificationStatus)}
+          tone={notificationStatus === "failed" ? "warning" : "quiet"}
+          icon={notificationStatus === "failed" ? "warning" : "clock"}
+        >
+          <p>
+            {notificationReason ??
+              "Notification status was recorded without additional detail."}{" "}
+            Email is optional and does not change research data quality or
+            scheduled-run reliability.
+          </p>
+        </Notice>
+      ) : null}
+
+      {researchDiagnostics.length ? (
+        <Notice
+          title={`${researchDiagnostics.length} research diagnostic${
+            researchDiagnostics.length === 1 ? "" : "s"
           }`}
           tone="warning"
           icon="warning"
         >
           <ul className="compact-list">
-            {report.errors.map((item, index) => (
+            {researchDiagnostics.map((item, index) => (
               <li key={`${index}-${item}`}>{item}</li>
             ))}
           </ul>
         </Notice>
       ) : (
-        <Notice title="Run completed without saved diagnostics" tone="quiet" icon="check">
+        <Notice title="Research completed without saved data diagnostics" tone="quiet" icon="check">
           <p>
             Review source timestamps below before relying on any result.
           </p>
@@ -672,6 +697,31 @@ function recordStringArray(
         (item): item is string => typeof item === "string" && Boolean(item),
       )
     : [];
+}
+
+function recordObject(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null {
+  const value = record[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function notificationTitle(status: string): string {
+  switch (status) {
+    case "sent":
+      return "Email notification sent";
+    case "skipped":
+      return "Email notification skipped (optional)";
+    case "failed":
+      return "Email notification failed";
+    case "not-requested":
+      return "Email notification not requested for this manual run";
+    default:
+      return "Email notification pending";
+  }
 }
 
 function safeHttpUrl(value: string): string | null {

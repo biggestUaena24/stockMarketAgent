@@ -550,12 +550,17 @@ function SettingsForm({
                 onChange={(event) => setLedgerReconciled(event.target.checked)}
               />
               <span>
-                I compared the ledger with Wealthsimple.
+                I compared the current saved ledger with Wealthsimple after its
+                most recent change.
                 {settings.ledgerReconciledAt
                   ? ` Last recorded ${dateTime(settings.ledgerReconciledAt)}.`
                   : ""}
               </span>
             </label>
+            <p className="micro-meta">
+              Adding, editing, deleting, or importing a ledger row clears this
+              acknowledgement automatically.
+            </p>
             <label className="checkbox-field">
               <input
                 type="checkbox"
@@ -566,9 +571,14 @@ function SettingsForm({
                 Start or continue the paper trial.
                 {settings.paperTrialStartedAt
                   ? ` Started ${dateTime(settings.paperTrialStartedAt)}.`
-                  : " This records the start when saved."}
+                  : " This records the start only when these settings are saved; running research by itself does not start the trial."}
               </span>
             </label>
+            <p className="micro-meta">
+              Starting the trial requires completed onboarding and a ledger
+              reconciliation acknowledgement. Only scheduled morning and evening
+              research runs count toward its reliability gate.
+            </p>
             <label className="checkbox-field">
               <input
                 type="checkbox"

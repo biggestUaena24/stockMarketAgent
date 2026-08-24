@@ -53,7 +53,7 @@ export async function updateOwnerSettings(
   ownerEmail: string,
   payload: Record<string, unknown>,
 ): Promise<OwnerSettings> {
-  await getOrCreateSettings(ownerEmail);
+  const current = await getOrCreateSettings(ownerEmail);
   const now = new Date().toISOString();
   const values: Partial<typeof ownerSettings.$inferInsert> = {
     updatedAt: now,
@@ -157,6 +157,25 @@ export async function updateOwnerSettings(
     values.paperTrialStartedAt = optionalIsoDate(
       payload.paperTrialStartedAt,
       "paperTrialStartedAt",
+    );
+  }
+
+  const nextPaperTrialStartedAt =
+    values.paperTrialStartedAt === undefined
+      ? current.paperTrialStartedAt
+      : values.paperTrialStartedAt;
+  const nextOnboardingComplete =
+    values.onboardingComplete ?? current.onboardingComplete;
+  const nextLedgerReconciledAt =
+    values.ledgerReconciledAt === undefined
+      ? current.ledgerReconciledAt
+      : values.ledgerReconciledAt;
+  if (
+    nextPaperTrialStartedAt &&
+    (!nextOnboardingComplete || !nextLedgerReconciledAt)
+  ) {
+    throw new ApiError(
+      "Complete onboarding and reconcile the ledger before starting or continuing the paper trial.",
     );
   }
 

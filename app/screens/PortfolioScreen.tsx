@@ -16,6 +16,7 @@ import {
 import {
   apiRequest,
   dateTime,
+  marketDataTime,
   money,
   percent,
   useApi,
@@ -79,7 +80,9 @@ export function PortfolioScreen() {
           notes: String(form.get("notes") ?? ""),
         }),
       });
-      setMessage("Transaction saved. Portfolio math has been recalculated.");
+      setMessage(
+        "Transaction saved. Reconciliation was cleared; compare the updated ledger with Wealthsimple before acknowledging it again.",
+      );
       setFormOpen(false);
       await Promise.all([ledger.reload(), dashboard.reload()]);
     } catch (caught) {
@@ -98,7 +101,9 @@ export function PortfolioScreen() {
       await apiRequest(`/api/transactions/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
-      setMessage("Transaction removed and calculations refreshed.");
+      setMessage(
+        "Transaction removed. Reconciliation was cleared; compare the updated ledger with Wealthsimple before acknowledging it again.",
+      );
       await Promise.all([ledger.reload(), dashboard.reload()]);
     } catch (caught) {
       setMessage(
@@ -324,8 +329,9 @@ export function PortfolioScreen() {
             <p>
               Native-currency return shows the security itself. CAD return also
               reflects recorded exchange rates and the modeled Wealthsimple
-              conversion fee. Current values use ledger prices until a fresh
-              provider quote is available.
+              conversion fee. Each row identifies whether its mark comes from a
+              saved provider quote or an explicit ledger-price fallback. USD
+              marks use the latest FX rate recorded in the ledger.
             </p>
           </Notice>
 
@@ -349,7 +355,8 @@ export function PortfolioScreen() {
                       <th>Security</th>
                       <th className="number">Shares</th>
                       <th className="number">Average cost</th>
-                      <th className="number">Ledger value</th>
+                      <th className="number">Estimated value</th>
+                      <th>Price basis</th>
                       <th className="number">Native return</th>
                       <th className="number">CAD return</th>
                       <th className="number">Allocation</th>
@@ -377,6 +384,39 @@ export function PortfolioScreen() {
                           <span className="cell-subtitle">
                             mark {money(holding.markedPriceNative, holding.currency)}
                           </span>
+                        </td>
+                        <td>
+                          <strong>{holding.markSourceLabel}</strong>
+                          <span className="cell-subtitle">
+                            {marketDataTime(
+                              holding.markedPriceAt,
+                              holding.markedPriceTimePrecision,
+                            )} ·{" "}
+                            {markFreshnessLabel(
+                              holding.markFreshness,
+                              holding.markAgeMinutes,
+                            )}
+                          </span>
+                          {holding.markSourceUrl ? (
+                            <a
+                              className="inline-link"
+                              href={holding.markSourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Quote source
+                            </a>
+                          ) : (
+                            <span className="cell-subtitle">
+                              {holding.markFallbackReason}
+                            </span>
+                          )}
+                          {holding.currency === "USD" ? (
+                            <span className="cell-subtitle">
+                              CAD at {holding.cadFxRate.toFixed(4)} ·{" "}
+                              {holding.cadFxSourceLabel} ({dateTime(holding.cadFxAt)})
+                            </span>
+                          ) : null}
                         </td>
                         <td
                           className={`number ${
@@ -517,4 +557,20 @@ function localDateTimeValue(): string {
   const date = new Date();
   const offset = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function markFreshnessLabel(
+  freshness: "fresh" | "stale" | "ledger-fallback",
+  ageMinutes: number | null,
+): string {
+  if (freshness === "ledger-fallback") return "not a market quote";
+  const age =
+    ageMinutes === null
+      ? "age unavailable"
+      : ageMinutes < 60
+        ? `${ageMinutes} min old`
+        : ageMinutes < 48 * 60
+          ? `${Math.round(ageMinutes / 60)} hr old`
+          : `${Math.round(ageMinutes / 1_440)} days old`;
+  return `${freshness === "fresh" ? "fresh" : "stale"} · ${age}`;
 }

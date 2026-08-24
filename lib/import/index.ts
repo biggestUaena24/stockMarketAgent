@@ -1,5 +1,6 @@
 export { parseCsv } from "./csv";
 export { sha256, stableHash, stableStringify } from "./hash";
+export { assessImportSafety } from "./safety";
 export {
   normalizeWealthsimpleCsv,
   summarizeReconciliation,
@@ -26,4 +27,12 @@ export type {
   WealthsimpleImportKind,
   WealthsimpleImportOptions,
   WealthsimpleImportResult,
+  LedgerImportPreviewRow,
+  LedgerImportPreviewTransaction,
 } from "./types";
+export type {
+  ExistingLedgerEntry,
+  ImportSafetyAssessment,
+  LedgerImportCandidate,
+  LedgerImportValues,
+} from "./safety";

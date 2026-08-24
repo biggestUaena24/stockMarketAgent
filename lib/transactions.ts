@@ -1,6 +1,6 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, exists } from "drizzle-orm";
 import { getReadyDb } from "@/db";
-import { transactions } from "@/db/schema";
+import { ownerSettings, transactions } from "@/db/schema";
 import { ApiError, clampNumber, cleanText } from "./http";
 import { newId } from "./ids";
 
@@ -55,10 +55,20 @@ export async function createTransaction(
   const values = validateTransactionInput(input);
   const db = await getReadyDb();
   const id = newId("txn");
-  const [created] = await db
-    .insert(transactions)
-    .values({ id, ownerEmail, ...values })
-    .returning();
+  const now = new Date().toISOString();
+  const [, createdRows] = await db.batch([
+    db.insert(ownerSettings).values({ ownerEmail }).onConflictDoNothing(),
+    db
+      .insert(transactions)
+      .values({ id, ownerEmail, ...values })
+      .returning(),
+    db
+      .update(ownerSettings)
+      .set({ ledgerReconciledAt: null, updatedAt: now })
+      .where(eq(ownerSettings.ownerEmail, ownerEmail)),
+  ]);
+  const [created] = createdRows;
+  if (!created) throw new Error("Unable to save the transaction.");
   return mapTransaction(created);
 }
 
@@ -69,13 +79,34 @@ export async function updateTransaction(
 ): Promise<TransactionRecord> {
   const values = validateTransactionInput(input);
   const db = await getReadyDb();
-  const [updated] = await db
-    .update(transactions)
-    .set({ ...values, updatedAt: new Date().toISOString() })
-    .where(
-      and(eq(transactions.ownerEmail, ownerEmail), eq(transactions.id, id)),
-    )
-    .returning();
+  const now = new Date().toISOString();
+  const target = and(
+    eq(transactions.ownerEmail, ownerEmail),
+    eq(transactions.id, id),
+  );
+  const [, , updatedRows] = await db.batch([
+    db.insert(ownerSettings).values({ ownerEmail }).onConflictDoNothing(),
+    db
+      .update(ownerSettings)
+      .set({ ledgerReconciledAt: null, updatedAt: now })
+      .where(
+        and(
+          eq(ownerSettings.ownerEmail, ownerEmail),
+          exists(
+            db
+              .select({ id: transactions.id })
+              .from(transactions)
+              .where(target),
+          ),
+        ),
+      ),
+    db
+      .update(transactions)
+      .set({ ...values, updatedAt: now })
+      .where(target)
+      .returning(),
+  ]);
+  const [updated] = updatedRows;
   if (!updated) throw new ApiError("Transaction not found.", 404, "NOT_FOUND");
   return mapTransaction(updated);
 }
@@ -85,12 +116,32 @@ export async function deleteTransaction(
   id: string,
 ): Promise<void> {
   const db = await getReadyDb();
-  const deleted = await db
-    .delete(transactions)
-    .where(
-      and(eq(transactions.ownerEmail, ownerEmail), eq(transactions.id, id)),
-    )
-    .returning({ id: transactions.id });
+  const now = new Date().toISOString();
+  const target = and(
+    eq(transactions.ownerEmail, ownerEmail),
+    eq(transactions.id, id),
+  );
+  const [, , deleted] = await db.batch([
+    db.insert(ownerSettings).values({ ownerEmail }).onConflictDoNothing(),
+    db
+      .update(ownerSettings)
+      .set({ ledgerReconciledAt: null, updatedAt: now })
+      .where(
+        and(
+          eq(ownerSettings.ownerEmail, ownerEmail),
+          exists(
+            db
+              .select({ id: transactions.id })
+              .from(transactions)
+              .where(target),
+          ),
+        ),
+      ),
+    db
+      .delete(transactions)
+      .where(target)
+      .returning({ id: transactions.id }),
+  ]);
   if (!deleted[0]) {
     throw new ApiError("Transaction not found.", 404, "NOT_FOUND");
   }

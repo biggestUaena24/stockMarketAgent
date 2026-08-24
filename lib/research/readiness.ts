@@ -9,7 +9,7 @@ const REQUIRED_MARKET_SESSIONS = 20;
 const REQUIRED_RUN_RELIABILITY = 0.95;
 
 export interface PaperTrialRecord {
-  startedOn: string;
+  startedOn: string | null;
   completedMarketSessions: number;
   scheduledRuns: number;
   successfulRuns: number;
@@ -63,9 +63,10 @@ function utcDay(value: string): number | null {
 }
 
 export function calendarDayDifference(
-  startedOn: string,
+  startedOn: string | null,
   evaluationDate: string,
 ): number {
+  if (!startedOn) return 0;
   const start = utcDay(startedOn);
   const end = utcDay(evaluationDate);
   if (start === null || end === null || end < start) {
@@ -91,6 +92,14 @@ export function evaluateOperationalReadiness(
     input.paperTrial.scheduledRuns > 0 && countsAreValid
       ? input.paperTrial.successfulRuns / input.paperTrial.scheduledRuns
       : 0;
+
+  if (!input.paperTrial.startedOn) {
+    blockers.push({
+      code: "paper-trial-not-started",
+      message:
+        "Start the paper trial explicitly in Settings after onboarding and ledger reconciliation.",
+    });
+  }
 
   if (!input.provider.isFullDataProvider || input.provider.mode !== "full") {
     blockers.push({

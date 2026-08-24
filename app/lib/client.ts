@@ -120,6 +120,20 @@ export function dateOnly(value: string | null | undefined): string {
   }).format(new Date(value));
 }
 
+export function marketDataTime(
+  value: string | null | undefined,
+  precision: "market-date" | "timestamp" | "ledger-time",
+): string {
+  if (!value || !Number.isFinite(Date.parse(value))) return "Not available";
+  if (precision === "market-date") {
+    return `${new Intl.DateTimeFormat("en-CA", {
+      timeZone: "UTC",
+      dateStyle: "medium",
+    }).format(new Date(value))} market date`;
+  }
+  return dateTime(value);
+}
+
 export function actionTone(
   action: string,
 ): "neutral" | "good" | "watch" | "risk" | "info" {

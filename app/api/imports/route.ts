@@ -1,12 +1,15 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getReadyDb } from "@/db";
-import { importBatches, transactions } from "@/db/schema";
+import { importBatches, ownerSettings, transactions } from "@/db/schema";
 import { requireApiOwner } from "@/lib/api-context";
 import { ApiError, errorResponse } from "@/lib/http";
 import {
+  assessImportSafety,
   normalizeWealthsimpleCsv,
   sha256 as importSha256,
   type ImportIssue,
+  type LedgerImportPreviewRow,
+  type LedgerImportValues,
   type NormalizedWealthsimpleRecord,
 } from "@/lib/import";
 import { newId } from "@/lib/ids";
@@ -14,6 +17,10 @@ import { getOrCreateSettings } from "@/lib/settings";
 import { validateTransactionInput } from "@/lib/transactions";
 
 const MAX_CSV_BYTES = 2 * 1024 * 1024;
+// Seven rows keep each multi-value INSERT below D1's bound-parameter limit;
+// 600 rows stay below the 100-statement batch ceiling after metadata/reset work.
+const MAX_ATOMIC_IMPORT_ROWS = 600;
+const IMPORT_INSERT_CHUNK_SIZE = 7;
 
 export async function GET(request: Request) {
   const auth = requireApiOwner(request);
@@ -58,62 +65,134 @@ export async function POST(request: Request) {
     const db = await getReadyDb();
     const existingRows = await db
       .select({
+        action: transactions.action,
+        canonicalSymbol: transactions.canonicalSymbol,
+        exchange: transactions.exchange,
+        quantity: transactions.quantity,
+        price: transactions.price,
+        currency: transactions.currency,
+        fee: transactions.fee,
+        fxRateToCad: transactions.fxRateToCad,
+        occurredAt: transactions.occurredAt,
         importId: transactions.importId,
         rowHash: transactions.importRowHash,
+        notes: transactions.notes,
       })
       .from(transactions)
       .where(eq(transactions.ownerEmail, auth.ownerEmail));
     const csv = await file.text();
     const scope = importSha256(`cedar|${auth.ownerEmail.toLowerCase()}`);
+    const requestedKind =
+      form.get("kind") === "holdings" || form.get("kind") === "activities"
+        ? (form.get("kind") as "holdings" | "activities")
+        : "auto";
+    const defaultExchange = optionalFormText(form.get("defaultExchange"));
+    const defaultDate = optionalFormText(form.get("defaultDate"));
+    const dateOrder =
+      form.get("dateOrder") === "DMY" || form.get("dateOrder") === "YMD"
+        ? (form.get("dateOrder") as "DMY" | "YMD")
+        : "MDY";
     const defaultFxRate = parsePositiveNumber(
       form.get("defaultFxRate"),
       "defaultFxRate",
       false,
     );
-    const result = normalizeWealthsimpleCsv(csv, {
-      kind:
-        form.get("kind") === "holdings" || form.get("kind") === "activities"
-          ? (form.get("kind") as "holdings" | "activities")
-          : "auto",
+    const normalizationOptions = {
+      kind: requestedKind,
       scope,
       accountCurrency: "CAD",
-      defaultCurrency: "CAD",
-      defaultExchange:
-        typeof form.get("defaultExchange") === "string"
-          ? String(form.get("defaultExchange"))
-          : "TSX",
-      defaultDate:
-        typeof form.get("defaultDate") === "string" &&
-        String(form.get("defaultDate"))
-          ? String(form.get("defaultDate"))
-          : undefined,
-      dateOrder:
-        form.get("dateOrder") === "DMY" || form.get("dateOrder") === "YMD"
-          ? (form.get("dateOrder") as "DMY" | "YMD")
-          : "MDY",
+      defaultExchange,
+      defaultDate: requestedKind === "holdings" ? defaultDate : undefined,
+      dateOrder,
       existingImports: existingRows.flatMap((row) =>
         row.importId
           ? [{ importId: row.importId, rowHash: row.rowHash ?? undefined }]
           : [],
       ),
-    });
+    } as const;
+    let result = normalizeWealthsimpleCsv(csv, normalizationOptions);
+    if (
+      requestedKind === "auto" &&
+      result.kind === "holdings" &&
+      defaultDate
+    ) {
+      result = normalizeWealthsimpleCsv(csv, {
+        ...normalizationOptions,
+        defaultDate,
+      });
+    }
 
     const mapped = result.records.map((record) =>
-      mapImportedRecord(record, defaultFxRate),
+      validateMappedRecord(mapImportedRecord(record, defaultFxRate)),
     );
-    const serverIssues = mapped.flatMap((item) => item.issues);
+    const safety = assessImportSafety(
+      result.kind,
+      mapped.map((item) => ({
+        record: item.record,
+        values: item.values as LedgerImportValues | null,
+      })),
+      existingRows,
+    );
+    const hasGlobalBlock = safety.globalIssues.some(
+      (issue) => issue.severity === "error",
+    );
+    const mappedWithSafety = mapped.map((item) => ({
+      ...item,
+      issues: [
+        ...item.issues,
+        ...(safety.issuesByRow.get(item.record.rowNumber) ?? []),
+      ],
+    }));
+    const serverIssues = [
+      ...safety.globalIssues,
+      ...mappedWithSafety.flatMap((item) => item.issues),
+    ];
     const importable = mapped.flatMap((item) =>
-      item.values && item.issues.every((issue) => issue.severity !== "error")
+      item.values &&
+      !hasGlobalBlock &&
+      (safety.issuesByRow.get(item.record.rowNumber) ?? []).every(
+        (issue) => issue.severity !== "error",
+      ) &&
+      item.issues.every((issue) => issue.severity !== "error")
         ? [{ record: item.record, values: item.values }]
         : [],
     );
     const fingerprint = importSha256(`${scope}|${csv}`);
+    const previewFingerprint = importSha256(
+      JSON.stringify({
+        fingerprint,
+        requestedKind,
+        defaultExchange: defaultExchange ?? null,
+        defaultDate: defaultDate ?? null,
+        dateOrder,
+        defaultFxRate,
+      }),
+    );
+    const previewRows: LedgerImportPreviewRow[] = mappedWithSafety.map(
+      (item) => ({
+        rowNumber: item.record.rowNumber,
+        importId: item.record.importId,
+        sourceKind: item.record.kind,
+        status:
+          !hasGlobalBlock &&
+          item.values &&
+          item.issues.every((issue) => issue.severity !== "error")
+            ? "ready"
+            : "blocked",
+        transaction: item.values
+          ? toPreviewTransaction(item.values as LedgerImportValues)
+          : null,
+        issues: item.issues,
+      }),
+    );
 
     if (mode === "preview") {
       return Response.json({
         mode,
         result,
         serverIssues,
+        previewRows,
+        previewFingerprint,
         importableRows: importable.length,
         originalFileRetained: false,
       });
@@ -123,6 +202,13 @@ export async function POST(request: Request) {
         "Preview and confirm the reconciliation before importing.",
         409,
         "PREVIEW_REQUIRED",
+      );
+    }
+    if (form.get("previewFingerprint") !== previewFingerprint) {
+      throw new ApiError(
+        "The file or import options changed after preview. Preview again before committing.",
+        409,
+        "PREVIEW_CHANGED",
       );
     }
     const blockingIssues = [
@@ -140,24 +226,49 @@ export async function POST(request: Request) {
         { issues: blockingIssues },
       );
     }
-
-    let inserted = 0;
-    for (const item of importable) {
-      const values = validateTransactionInput(item.values);
-      const write = await db
-        .insert(transactions)
-        .values({
-          id: newId("txn"),
-          ownerEmail: auth.ownerEmail,
-          ...values,
-          importId: item.record.importId,
-          importRowHash: item.record.rowHash,
-        })
-        .onConflictDoNothing()
-        .returning({ id: transactions.id });
-      inserted += write.length;
+    if (importable.length === 0) {
+      throw new ApiError(
+        "No new normalized rows are ready to import. Resolve the blocked rows or keep the existing duplicates.",
+        422,
+        "NO_IMPORTABLE_ROWS",
+      );
     }
-    await db
+    if (importable.length > MAX_ATOMIC_IMPORT_ROWS) {
+      throw new ApiError(
+        `This commit has ${importable.length} new rows. Split the CSV into files of at most ${MAX_ATOMIC_IMPORT_ROWS} new rows so each import and reconciliation reset can remain atomic.`,
+        422,
+        "IMPORT_TOO_LARGE_FOR_ATOMIC_COMMIT",
+      );
+    }
+
+    const pendingRows = importable.map((item) => {
+      const values = validateTransactionInput(item.values);
+      return {
+        id: newId("txn"),
+        ownerEmail: auth.ownerEmail,
+        ...values,
+        importId: item.record.importId,
+        importRowHash: item.record.rowHash,
+      };
+    });
+    const insertQueries = chunk(pendingRows, IMPORT_INSERT_CHUNK_SIZE).map(
+      (rows) =>
+        db
+        .insert(transactions)
+        .values(rows)
+        .onConflictDoNothing()
+        .returning({ id: transactions.id }),
+    );
+    const pendingIdsJson = JSON.stringify(pendingRows.map((row) => row.id));
+    const insertedRowsCount = sql<number>`(
+      SELECT COUNT(*) FROM ${transactions}
+      WHERE ${transactions.ownerEmail} = ${auth.ownerEmail}
+        AND ${transactions.id} IN (SELECT value FROM json_each(${pendingIdsJson}))
+    )`;
+    const sourceDuplicateRows = result.rows.filter(
+      (row) => row.status === "duplicate",
+    ).length;
+    const batchInsert = db
       .insert(importBatches)
       .values({
         id: newId("imp"),
@@ -165,13 +276,12 @@ export async function POST(request: Request) {
         fingerprint,
         kind: result.kind ?? "unknown",
         fileName: sanitizeFileName(file.name),
-        importedRows: inserted,
+        importedRows: insertedRowsCount,
         rejectedRows:
           result.rows.filter((row) => row.status === "rejected").length +
-          serverIssues.filter((issue) => issue.severity === "error").length,
-        duplicateRows: result.rows.filter(
-          (row) => row.status === "duplicate",
-        ).length,
+          result.rows.filter((row) => row.status === "conflict").length +
+          previewRows.filter((row) => row.status === "blocked").length,
+        duplicateRows: sql<number>`${sourceDuplicateRows + pendingRows.length} - ${insertedRowsCount}`,
         reconciliationJson: JSON.stringify({
           ...result.reconciliation,
           serverIssues,
@@ -179,6 +289,39 @@ export async function POST(request: Request) {
         }),
       })
       .onConflictDoNothing();
+    const invalidateReconciliation = db
+      .update(ownerSettings)
+      .set({
+        ledgerReconciledAt: null,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(
+        and(
+          eq(ownerSettings.ownerEmail, auth.ownerEmail),
+          sql`EXISTS (
+            SELECT 1 FROM ${transactions}
+            WHERE ${transactions.ownerEmail} = ${auth.ownerEmail}
+              AND ${transactions.id} IN (SELECT value FROM json_each(${pendingIdsJson}))
+          )`,
+        ),
+      );
+    const firstInsertQuery = insertQueries[0];
+    if (!firstInsertQuery) {
+      throw new Error("Atomic import requires at least one insert query.");
+    }
+    const atomicQueries = [
+      firstInsertQuery,
+      ...insertQueries.slice(1),
+      batchInsert,
+      invalidateReconciliation,
+    ] as const;
+    const atomicResults = await db.batch(atomicQueries);
+    const inserted = atomicResults
+      .slice(0, insertQueries.length)
+      .reduce<number>(
+        (count, rows) => count + (Array.isArray(rows) ? rows.length : 0),
+        0,
+      );
 
     return Response.json(
       {
@@ -189,6 +332,8 @@ export async function POST(request: Request) {
           result.rows.filter((row) => row.status === "duplicate").length,
         result,
         serverIssues,
+        previewRows,
+        previewFingerprint,
         originalFileRetained: false,
         usdAccountEnabled: settings.usdAccountEnabled,
       },
@@ -197,6 +342,14 @@ export async function POST(request: Request) {
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+function chunk<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function mapImportedRecord(
@@ -352,6 +505,53 @@ function mapImportedRecord(
     });
   }
   return { record, values, issues };
+}
+
+function validateMappedRecord(item: ReturnType<typeof mapImportedRecord>) {
+  if (
+    !item.values ||
+    item.issues.some((issue) => issue.severity === "error")
+  ) {
+    return item;
+  }
+  try {
+    return { ...item, values: validateTransactionInput(item.values) };
+  } catch (error) {
+    const validationIssue: ImportIssue = {
+      severity: "error",
+      code: "LEDGER_VALIDATION_FAILED",
+      message:
+        error instanceof Error
+          ? error.message
+          : "The normalized row is not valid for the portfolio ledger.",
+      rowNumber: item.record.rowNumber,
+    };
+    return {
+      ...item,
+      values: null,
+      issues: [...item.issues, validationIssue],
+    };
+  }
+}
+
+function toPreviewTransaction(
+  values: LedgerImportValues,
+): LedgerImportPreviewRow["transaction"] {
+  return {
+    action: values.action,
+    canonicalSymbol: values.canonicalSymbol,
+    exchange: values.exchange,
+    quantity: values.quantity,
+    price: values.price,
+    currency: values.currency === "USD" ? "USD" : "CAD",
+    fee: values.fee,
+    fxRateToCad: values.fxRateToCad,
+    occurredAt: values.occurredAt,
+  };
+}
+
+function optionalFormText(value: FormDataEntryValue | null): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function parsePositiveNumber(

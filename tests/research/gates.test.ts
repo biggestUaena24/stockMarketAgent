@@ -254,4 +254,41 @@ test("live labels require full provider and the complete paper trial", () => {
     readinessInput({ explicitUserAcknowledgementAt: null }),
   );
   assert.equal(unacknowledged.canUseLiveActionLabels, false);
+
+  const invalidPortfolio = evaluateOperationalReadiness(
+    readinessInput({
+      portfolioRiskGate: {
+        status: "block",
+        reasons: [
+          {
+            code: "portfolio-data-invalid",
+            message: "The portfolio ledger has unresolved diagnostics.",
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(invalidPortfolio.canUseLiveActionLabels, false);
+  assert.equal(
+    invalidPortfolio.blockers.some(
+      (blocker) => blocker.code === "portfolio-data-invalid",
+    ),
+    true,
+  );
+
+  const notStarted = evaluateOperationalReadiness(
+    readinessInput({
+      paperTrial: {
+        ...readinessInput().paperTrial,
+        startedOn: null,
+      },
+    }),
+  );
+  assert.equal(notStarted.canUseLiveActionLabels, false);
+  assert.equal(
+    notStarted.blockers.some(
+      (blocker) => blocker.code === "paper-trial-not-started",
+    ),
+    true,
+  );
 });

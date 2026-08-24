@@ -1428,6 +1428,28 @@ textarea:focus-visible {
   font-size: 19px;
 }
 
+.section-heading-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 20px 0 10px;
+}
+
+.section-heading-row h3 {
+  margin: 0 0 3px;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 15px;
+}
+
+.section-heading-row p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+}
+
 .issue-list {
   display: grid;
   gap: 7px;

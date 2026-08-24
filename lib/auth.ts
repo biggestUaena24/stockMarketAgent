@@ -5,9 +5,9 @@ import {
   getChatGPTUser,
 } from "@/app/chatgpt-auth";
 import {
+  canonicalOwnerStorageKey,
   constantTimeEqual,
   evaluateOwnerStatus,
-  normalizeEmail,
 } from "./auth-policy";
 import { getRuntimeEnv, isLocalDevelopment } from "./runtime-env";
 
@@ -16,15 +16,18 @@ const NAME_HEADER = "oai-authenticated-user-full-name";
 const NAME_ENCODING_HEADER = "oai-authenticated-user-full-name-encoding";
 
 export type OwnerAccess =
-  | { status: "authorized"; user: ChatGPTUser; localDemo: boolean }
+  | {
+      status: "authorized";
+      user: ChatGPTUser;
+      localDemo: boolean;
+      ownerEmail: string;
+    }
   | { status: "owner_unconfigured"; user: ChatGPTUser }
   | { status: "forbidden"; user: ChatGPTUser }
   | { status: "unauthenticated"; user: null };
 
-function configuredOwner(): string | null {
-  return getRuntimeEnv("OWNER_EMAIL")
-    ? normalizeEmail(getRuntimeEnv("OWNER_EMAIL")!)
-    : null;
+export function getConfiguredOwnerEmail(): string | null {
+  return canonicalOwnerStorageKey(getRuntimeEnv("OWNER_EMAIL"));
 }
 
 function localUser(): ChatGPTUser {
@@ -36,13 +39,20 @@ function localUser(): ChatGPTUser {
 }
 
 function evaluateUser(user: ChatGPTUser | null): OwnerAccess {
+  const ownerEmail = getConfiguredOwnerEmail();
   const status = evaluateOwnerStatus({
     userEmail: user?.email ?? null,
-    configuredOwnerEmail: configuredOwner(),
+    configuredOwnerEmail: ownerEmail,
     localDevelopment: isLocalDevelopment(),
   });
   if (status === "authorized" && !user) {
-    return { status: "authorized", user: localUser(), localDemo: true };
+    const local = localUser();
+    return {
+      status: "authorized",
+      user: local,
+      localDemo: true,
+      ownerEmail: local.email,
+    };
   }
   if (status === "unauthenticated" || !user) {
     return { status: "unauthenticated", user: null };
@@ -55,6 +65,11 @@ function evaluateUser(user: ChatGPTUser | null): OwnerAccess {
     status: "authorized",
     user,
     localDemo: false,
+    // Authorization compares the signed-in email case-insensitively, but all
+    // persistent records use the configured allowlist value as one canonical
+    // key. A differently-cased identity header can therefore never create a
+    // second D1 owner namespace.
+    ownerEmail: ownerEmail!,
   };
 }
 
@@ -95,7 +110,7 @@ export function getOwnerApiAccess(request: Request): OwnerAccess {
 export function ownerEmailFromAccess(
   access: OwnerAccess,
 ): string | null {
-  return access.status === "authorized" ? access.user.email : null;
+  return access.status === "authorized" ? access.ownerEmail : null;
 }
 
 export function apiAuthFailure(access: OwnerAccess): Response | null {
