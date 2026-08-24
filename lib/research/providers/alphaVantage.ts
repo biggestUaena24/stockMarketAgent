@@ -98,7 +98,7 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
       options.baseUrl?.replace(/\/+$/, "") ?? "https://www.alphavantage.co/query";
     this.requestSpacingMs = Math.max(
       0,
-      Math.trunc(options.requestSpacingMs ?? 1_100),
+      Math.trunc(options.requestSpacingMs ?? 2_100),
     );
     this.clockMs = options.clockMs ?? (() => Date.now());
     this.sleep =

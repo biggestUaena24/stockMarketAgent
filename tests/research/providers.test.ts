@@ -70,7 +70,6 @@ test("Alpha Vantage serializes free-tier network requests with spacing", async (
   const provider = new AlphaVantageTrialProvider({
     apiKey: "test-secret",
     now: fixedNow,
-    requestSpacingMs: 1_100,
     clockMs: () => clock,
     sleep: async (milliseconds) => {
       clock += milliseconds;
@@ -95,7 +94,7 @@ test("Alpha Vantage serializes free-tier network requests with spacing", async (
     provider.getQuote("GOOG"),
   ]);
   assert.equal(results.every((result) => result.ok), true);
-  assert.deepEqual(startedAt, [0, 1_100, 2_200]);
+  assert.deepEqual(startedAt, [0, 2_100, 4_200]);
 });
 
 test("Alpha Vantage redacts a key echoed by an upstream error", async () => {
