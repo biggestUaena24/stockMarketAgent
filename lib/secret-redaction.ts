@@ -50,3 +50,19 @@ export async function redactStoredResearchRunSecrets(
     ),
   );
 }
+
+export async function removeInvalidAlphaProviderCache(
+  d1: D1Database,
+): Promise<void> {
+  await d1
+    .prepare(
+      `DELETE FROM provider_cache
+       WHERE provider = 'alpha-vantage'
+         AND (
+           payload_json LIKE '%"Error Message":%'
+           OR payload_json LIKE '%"Information":%'
+           OR payload_json LIKE '%"Note":%'
+         )`,
+    )
+    .run();
+}

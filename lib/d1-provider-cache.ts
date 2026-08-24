@@ -51,6 +51,11 @@ export class D1ProviderCache implements ProviderCache {
         },
       });
   }
+
+  async delete(key: string): Promise<void> {
+    const db = await getReadyDb();
+    await db.delete(providerCache).where(eq(providerCache.cacheKey, key));
+  }
 }
 
 function extractAsOf(value: unknown): string | null {

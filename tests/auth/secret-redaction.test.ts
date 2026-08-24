@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   redactSensitiveText,
   redactStoredResearchRunSecrets,
+  removeInvalidAlphaProviderCache,
 } from "../../lib/secret-redaction.js";
 
 test("redacts explicit secrets and common credential-shaped diagnostics", () => {
@@ -42,4 +43,26 @@ test("stored research diagnostics are scrubbed with bound values", async () => {
     ["secret-one", "secret-one"],
     ["secret-two", "secret-two"],
   ]);
+});
+
+test("invalid Alpha payload cache cleanup targets provider error objects", async () => {
+  let statement = "";
+  let ran = false;
+  const fakeD1 = {
+    prepare(value: string) {
+      statement = value;
+      return {
+        async run() {
+          ran = true;
+          return { success: true };
+        },
+      };
+    },
+  } as unknown as D1Database;
+
+  await removeInvalidAlphaProviderCache(fakeD1);
+  assert.equal(ran, true);
+  assert.match(statement, /DELETE FROM provider_cache/);
+  assert.match(statement, /alpha-vantage/);
+  assert.match(statement, /Information/);
 });

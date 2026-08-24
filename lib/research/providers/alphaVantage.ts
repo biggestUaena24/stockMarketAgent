@@ -5,6 +5,7 @@ import type {
   NormalizedCompanyFacts,
   NormalizedNewsItem,
   NormalizedQuote,
+  ProviderError,
   ProviderResult,
 } from "../types";
 import { ALPHA_VANTAGE_TRIAL_PROFILE, unsupportedResult } from "./contracts";
@@ -60,22 +61,17 @@ function alphaPayloadError(payload: unknown): string | null {
   return null;
 }
 
-function alphaFailure<T>(
-  source: ProviderResult<unknown>,
+function alphaProviderError(
   message: string,
   sensitiveValues: readonly string[] = [],
-): ProviderResult<T> {
+): ProviderError {
   const safeMessage = redactSensitiveText(message, sensitiveValues);
   return {
-    ok: false,
-    error: {
-      code: /frequency|rate limit|requests per/i.test(safeMessage)
-        ? "rate-limit"
-        : "upstream",
-      message: `Alpha Vantage: ${safeMessage}`,
-      retryable: true,
-    },
-    meta: source.meta,
+    code: /frequency|rate limit|requests per/i.test(safeMessage)
+      ? "rate-limit"
+      : "upstream",
+    message: `Alpha Vantage: ${safeMessage}`,
+    retryable: true,
   };
 }
 
@@ -140,14 +136,11 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
       fetcher: this.throttledFetch,
       cache: this.cache,
       now: this.now,
+      payloadError: (payload) => {
+        const message = alphaPayloadError(payload);
+        return message ? alphaProviderError(message, [this.apiKey]) : null;
+      },
     });
-
-    if (result.ok) {
-      const providerError = alphaPayloadError(result.data);
-      if (providerError) {
-        return alphaFailure(result, providerError, [this.apiKey]);
-      }
-    }
     return result;
   }
 

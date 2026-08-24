@@ -3,7 +3,10 @@ import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
 import { runtimeSchemaStatements } from "./runtime-schema";
 import { ensureCanonicalOwnerStorage } from "../lib/owner-storage";
-import { redactStoredResearchRunSecrets } from "../lib/secret-redaction";
+import {
+  redactStoredResearchRunSecrets,
+  removeInvalidAlphaProviderCache,
+} from "../lib/secret-redaction";
 import { getRuntimeEnv } from "../lib/runtime-env";
 
 let schemaReady: Promise<void> | null = null;
@@ -45,6 +48,7 @@ export async function ensureDatabase(): Promise<void> {
           return value ? [value] : [];
         }),
       );
+      await removeInvalidAlphaProviderCache(d1);
     })().catch((error) => {
       schemaReady = null;
       throw error;

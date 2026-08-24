@@ -100,8 +100,10 @@ test("Alpha Vantage serializes free-tier network requests with spacing", async (
 
 test("Alpha Vantage redacts a key echoed by an upstream error", async () => {
   const apiKey = "SECRETKEY123456";
+  const cache = new MemoryProviderCache();
   const result = await new AlphaVantageTrialProvider({
     apiKey,
+    cache,
     now: fixedNow,
     requestSpacingMs: 0,
     fetcher: async () =>
@@ -115,6 +117,44 @@ test("Alpha Vantage redacts a key echoed by an upstream error", async () => {
     assert.equal(result.error.message.includes(apiKey), false);
     assert.match(result.error.message, /\[REDACTED\]/);
   }
+  const cached = await cache.get(
+    'alpha-vantage:quote:{"function":"GLOBAL_QUOTE","symbol":"AAPL"}',
+  );
+  assert.equal(cached, null);
+});
+
+test("Alpha Vantage rejects and evicts provider-error payloads instead of caching them", async () => {
+  let fetchCount = 0;
+  const cache = new MemoryProviderCache();
+  const cacheKey =
+    'alpha-vantage:quote:{"function":"GLOBAL_QUOTE","symbol":"AAPL"}';
+  await cache.set(cacheKey, {
+    data: { Information: "A cached rate-limit response." },
+    storedAt: "2026-07-23T13:00:00.000Z",
+    expiresAt: "2026-07-24T13:00:00.000Z",
+  });
+  const provider = new AlphaVantageTrialProvider({
+    apiKey: "test-secret",
+    cache,
+    now: fixedNow,
+    requestSpacingMs: 0,
+    fetcher: async () => {
+      fetchCount += 1;
+      return Response.json({
+        "Global Quote": {
+          "01. symbol": "AAPL",
+          "05. price": "101",
+          "07. latest trading day": "2026-07-22",
+        },
+      });
+    },
+  });
+
+  const result = await provider.getQuote("AAPL");
+  assert.equal(result.ok, true);
+  assert.equal(fetchCount, 1);
+  const cached = await cache.get<Record<string, unknown>>(cacheKey);
+  assert.equal("Information" in (cached?.data ?? {}), false);
 });
 
 test("HTTP layer returns expired cache only as an explicit stale fallback", async () => {

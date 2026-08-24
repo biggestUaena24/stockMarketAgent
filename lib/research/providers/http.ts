@@ -14,6 +14,7 @@ export interface ProviderCacheEntry<T> {
 export interface ProviderCache {
   get<T>(key: string): Promise<ProviderCacheEntry<T> | null>;
   set<T>(key: string, entry: ProviderCacheEntry<T>): Promise<void>;
+  delete?(key: string): Promise<void>;
 }
 
 export class MemoryProviderCache implements ProviderCache {
@@ -26,6 +27,10 @@ export class MemoryProviderCache implements ProviderCache {
   async set<T>(key: string, entry: ProviderCacheEntry<T>): Promise<void> {
     this.entries.set(key, entry);
   }
+
+  async delete(key: string): Promise<void> {
+    this.entries.delete(key);
+  }
 }
 
 export type FetchLike = (
@@ -33,7 +38,7 @@ export type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
-export interface JsonRequestOptions {
+export interface JsonRequestOptions<T = unknown> {
   profile: ResearchProviderProfile;
   operation: string;
   url: URL;
@@ -43,14 +48,15 @@ export interface JsonRequestOptions {
   fetcher?: FetchLike;
   cache?: ProviderCache;
   now?: () => Date;
+  payloadError?: (data: T) => ProviderError | null;
 }
 
 function endpointWithoutSecrets(url: URL): string {
   return `${url.origin}${url.pathname}`;
 }
 
-function metadata(
-  options: JsonRequestOptions,
+function metadata<T>(
+  options: JsonRequestOptions<T>,
   requestedAt: string,
 ): ProviderRequestMetadata {
   return {
@@ -148,15 +154,20 @@ function staleFallback<T>(
 }
 
 export async function requestJson<T>(
-  options: JsonRequestOptions,
+  options: JsonRequestOptions<T>,
 ): Promise<ProviderResult<T>> {
   const now = options.now ?? (() => new Date());
   const requestedAtDate = now();
   const requestedAt = requestedAtDate.toISOString();
   const baseMeta = metadata(options, requestedAt);
-  const cached = options.cache
+  let cached = options.cache
     ? await options.cache.get<T>(options.cacheKey)
     : null;
+
+  if (cached && options.payloadError?.(cached.data)) {
+    await options.cache?.delete?.(options.cacheKey);
+    cached = null;
+  }
 
   if (cached && Date.parse(cached.expiresAt) > requestedAtDate.getTime()) {
     return {
@@ -225,6 +236,17 @@ export async function requestJson<T>(
         message: "The market-data provider returned invalid JSON.",
         retryable: true,
       },
+      meta: { ...baseMeta, receivedAt },
+    };
+  }
+
+  const payloadError = options.payloadError?.(data);
+  if (payloadError) {
+    const fallback = staleFallback(cached, baseMeta, payloadError);
+    if (fallback) return fallback;
+    return {
+      ok: false,
+      error: payloadError,
       meta: { ...baseMeta, receivedAt },
     };
   }
