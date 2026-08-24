@@ -6,6 +6,7 @@ import { ApiError, errorResponse } from "@/lib/http";
 import {
   assessImportSafety,
   normalizeWealthsimpleCsv,
+  resolveImportFxRate,
   sha256 as importSha256,
   type ImportIssue,
   type LedgerImportPreviewRow,
@@ -369,12 +370,7 @@ function mapImportedRecord(
       rowNumber: record.rowNumber,
       field,
     });
-  const fxRate =
-    record.currency === "CAD"
-      ? 1
-      : record.kind === "activity"
-        ? (record.fxRate ?? defaultFxRate)
-        : defaultFxRate;
+  const fxRate = resolveImportFxRate(record, defaultFxRate);
   if (record.currency === "USD" && !fxRate) {
     issue("A CAD-per-USD FX rate is required for every USD row.", "fxRate");
   }

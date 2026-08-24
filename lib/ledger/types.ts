@@ -44,6 +44,20 @@ export interface WithdrawalTransaction extends BaseTransaction {
   amountCad: number;
 }
 
+/**
+ * Establishes a reconciled opening position without pretending that the
+ * snapshot itself was a trade. Both bases are supplied explicitly because a
+ * holdings statement can report a CAD basis that differs from a spot FX
+ * conversion of its native basis.
+ */
+export interface OpeningPositionTransaction extends BaseTransaction {
+  type: "opening_position";
+  security: Security;
+  quantity: number;
+  costBasisNative: number;
+  costBasisCad: number;
+}
+
 interface BaseTradeTransaction extends BaseTransaction {
   security: Security;
   quantity: number;
@@ -84,6 +98,7 @@ export type TradeTransaction = BuyTransaction | SellTransaction;
 export type LedgerTransaction =
   | ContributionTransaction
   | WithdrawalTransaction
+  | OpeningPositionTransaction
   | BuyTransaction
   | SellTransaction
   | DividendTransaction;

@@ -136,6 +136,53 @@ test("models both sides of Wealthsimple's 1.5% USD trade conversion", () => {
   assert.equal(valuation.unrealizedGainCad, 87.99);
 });
 
+test("opening positions preserve reported basis without cash movement or acquisition fees", () => {
+  const ledger = buildLedger(
+    [
+      {
+        id: "opening-1",
+        occurredAt: "2026-01-02",
+        type: "opening_position",
+        security: usdSecurity,
+        quantity: 6,
+        costBasisNative: 600,
+        costBasisCad: 810,
+      },
+      {
+        id: "opening-2",
+        occurredAt: "2026-01-02",
+        type: "opening_position",
+        security: usdSecurity,
+        quantity: 4,
+        costBasisNative: 400,
+        costBasisCad: 540,
+      },
+      {
+        id: "later-sale",
+        occurredAt: "2026-02-01",
+        type: "sell",
+        security: usdSecurity,
+        quantity: 4,
+        priceNative: 120,
+        cadPerNative: 1.4,
+      },
+    ],
+    { usdAccountEnabled: false },
+  );
+
+  const position = ledger.positions[securityKey(usdSecurity)];
+  assert.deepEqual(ledger.cash, { CAD: 661.92, USD: 0 });
+  assert.equal(position.quantity, 6);
+  assert.equal(position.costBasisNative, 600);
+  assert.equal(position.costBasisCad, 810);
+  assert.equal(position.realizedCostBasisNative, 400);
+  assert.equal(position.realizedCostBasisCad, 540);
+  assert.equal(position.realizedGainNative, 80);
+  assert.equal(position.realizedGainCad, 121.92);
+  assert.equal(position.tradeFeesCad, 0);
+  assert.equal(position.fxFeesCad, 10.08);
+});
+
 test("settles USD trades in USD without automatic FX when USD accounts are enabled", () => {
   const ledger = buildLedger(
     [

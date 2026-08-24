@@ -8,6 +8,9 @@ const { normalizeWealthsimpleCsv, sha256 } = await import(
   "../../lib/import/index.ts"
 );
 
+const officialHoldingsHeader =
+  "Account Name,Account Type,Account Classification,Account Number,Symbol,Exchange,MIC,Name,Security Type,Quantity,Position Direction,Market Price,Market Price Currency,Book Value (CAD),Book Value Currency (CAD),Book Value (Market),Book Value Currency (Market),Market Value,Market Value Currency,Market Unrealized Returns,Market Unrealized Returns Currency";
+
 test("normalizes holdings aliases, quoted values, and reconciliation totals", () => {
   const csv = [
     "\uFEFFGenerated for Wealthsimple Trade",
@@ -62,6 +65,209 @@ test("normalizes holdings aliases, quoted values, and reconciliation totals", ()
     USD: 512.5,
   });
   assert.doesNotMatch(JSON.stringify(result), /do not retain|contains, comma/);
+});
+
+test("normalizes the current official Wealthsimple holdings report", () => {
+  const csv = [
+    officialHoldingsHeader,
+    '"TFSA","TFSA","Trade","REDACTED","CAD","","","CAD","CURRENCY","125.50","LONG","1","CAD","125.50","CAD","125.50","CAD","125.50","CAD","0","CAD"',
+    '"TFSA","TFSA","Trade","REDACTED","EXMP","NASDAQ","XNAS","Example Corp.","EQUITY","2","LONG","60","USD","210","CAD","150","USD","120","USD","-30","USD"',
+    "",
+    '"As of 2026-08-24 15:47 GMT-06:00"',
+  ].join("\r\n");
+
+  const result = normalizeWealthsimpleCsv(csv, {
+    kind: "holdings",
+    scope: "tfsa-official",
+    accountCurrency: "CAD",
+    defaultDate: "2026-08-24",
+  });
+
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.records.length, 1);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].status, "accepted");
+  assert.deepEqual(
+    {
+      symbol: result.records[0].symbol,
+      exchange: result.records[0].exchange,
+      quantity: result.records[0].quantity,
+      currency: result.records[0].currency,
+      averageCost: result.records[0].averageCost,
+      price: result.records[0].price,
+      fxRate: result.records[0].fxRate,
+      asOfDate: result.records[0].asOfDate,
+    },
+    {
+      symbol: "EXMP",
+      exchange: "NASDAQ",
+      quantity: 2,
+      currency: "USD",
+      averageCost: 75,
+      price: 60,
+      fxRate: 1.4,
+      asOfDate: "2026-08-24",
+    },
+  );
+  assert.deepEqual(result.reconciliation.holdings.bookValueByCurrency, {
+    CAD: 0,
+    USD: 150,
+  });
+  assert.deepEqual(result.reconciliation.holdings.marketValueByCurrency, {
+    CAD: 0,
+    USD: 120,
+  });
+  for (const code of [
+    "SKIPPED_CASH_BALANCE",
+    "REPORT_FOOTER_USED",
+    "DERIVED_AVERAGE_COST",
+    "DERIVED_BOOK_FX_RATE",
+  ]) {
+    assert.equal(
+      result.warnings.some((warning) => warning.code === code),
+      true,
+      `expected ${code}`,
+    );
+  }
+  assert.doesNotMatch(JSON.stringify(result), /REDACTED|Example Corp/);
+});
+
+test("uses MIC safely and rejects official holdings metadata conflicts", () => {
+  const header =
+    "Symbol,Exchange,MIC,Security Type,Quantity,Average Cost,Market Price,Market Price Currency,Book Value (CAD),Book Value Currency (CAD),Book Value (Market),Book Value Currency (Market)";
+  const micOnly = normalizeWealthsimpleCsv(
+    [
+      header,
+      "EXMP,,XNAS,EQUITY,2,80,60,USD,210,CAD,150,USD",
+      '"As of 2026-08-24 15:47 GMT-06:00"',
+    ].join("\n"),
+    { kind: "holdings" },
+  );
+  assert.equal(micOnly.errors.length, 0);
+  assert.equal(micOnly.records[0].exchange, "NASDAQ");
+  assert.equal(micOnly.records[0].averageCost, 80);
+
+  const mismatchedMarket = normalizeWealthsimpleCsv(
+    [header, "EXMP,TSX,XNAS,EQUITY,2,80,60,USD,210,CAD,150,USD"].join(
+      "\n",
+    ),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(mismatchedMarket.records.length, 0);
+  assert.equal(
+    mismatchedMarket.errors.some(
+      (entry) => entry.code === "EXCHANGE_MIC_MISMATCH",
+    ),
+    true,
+  );
+
+  const mismatchedCurrency = normalizeWealthsimpleCsv(
+    [header, "EXMP,NASDAQ,XNAS,EQUITY,2,80,60,CAD,210,CAD,150,USD"].join(
+      "\n",
+    ),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(mismatchedCurrency.records.length, 0);
+  assert.equal(
+    mismatchedCurrency.errors.some(
+      (entry) => entry.code === "CONFLICTING_CURRENCY_VALUES",
+    ),
+    true,
+  );
+});
+
+test("fails closed on unsafe dates, positions, costs, and unknown footers", () => {
+  const securityHeader =
+    "Symbol,Exchange,Security Type,Quantity,Market Price,Market Price Currency,Book Value (CAD),Book Value Currency (CAD),Book Value (Market),Book Value Currency (Market)";
+  const dateMismatch = normalizeWealthsimpleCsv(
+    [
+      securityHeader,
+      "EXMP,NASDAQ,EQUITY,2,60,USD,210,CAD,150,USD",
+      '"As of 2026-08-24 15:47 GMT-06:00"',
+    ].join("\n"),
+    { kind: "holdings", defaultDate: "2026-08-23" },
+  );
+  assert.equal(dateMismatch.records.length, 0);
+  assert.equal(
+    dateMismatch.errors.some(
+      (entry) => entry.code === "SNAPSHOT_DATE_MISMATCH",
+    ),
+    true,
+  );
+
+  const zeroQuantity = normalizeWealthsimpleCsv(
+    [securityHeader, "EXMP,NASDAQ,EQUITY,0,60,USD,0,CAD,0,USD"].join(
+      "\n",
+    ),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(zeroQuantity.records.length, 0);
+  assert.equal(
+    zeroQuantity.errors.some(
+      (entry) => entry.code === "NON_POSITIVE_HOLDING_QUANTITY",
+    ),
+    true,
+  );
+  assert.equal(
+    zeroQuantity.warnings.some(
+      (entry) => entry.code === "DERIVED_AVERAGE_COST",
+    ),
+    false,
+  );
+
+  const zeroBookValue = normalizeWealthsimpleCsv(
+    [securityHeader, "EXMP,NASDAQ,EQUITY,2,60,USD,0,CAD,0,USD"].join(
+      "\n",
+    ),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(zeroBookValue.records.length, 0);
+  assert.equal(
+    zeroBookValue.errors.some(
+      (entry) => entry.code === "NON_POSITIVE_BOOK_VALUE",
+    ),
+    true,
+  );
+
+  const shortPosition = normalizeWealthsimpleCsv(
+    [
+      `${securityHeader},Position Direction`,
+      "EXMP,NASDAQ,EQUITY,2,60,USD,210,CAD,150,USD,SHORT",
+    ].join("\n"),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(shortPosition.records.length, 0);
+  assert.equal(
+    shortPosition.errors.some(
+      (entry) => entry.code === "UNSUPPORTED_POSITION_DIRECTION",
+    ),
+    true,
+  );
+
+  const misplacedFooter = normalizeWealthsimpleCsv(
+    [
+      securityHeader,
+      "EXMP,NASDAQ,EQUITY,2,60,USD,210,CAD,150,USD",
+      '"As of 2026-08-24 15:47 GMT-06:00"',
+      "EXM2,NASDAQ,EQUITY,1,30,USD,42,CAD,30,USD",
+    ].join("\n"),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(misplacedFooter.records.length, 0);
+  assert.equal(
+    misplacedFooter.errors.some(
+      (entry) => entry.code === "REPORT_FOOTER_NOT_FINAL",
+    ),
+    true,
+  );
+
+  const unknownFooter = normalizeWealthsimpleCsv(
+    [securityHeader, "not an official as-of footer"].join("\n"),
+    { kind: "holdings", defaultDate: "2026-08-24" },
+  );
+  assert.equal(unknownFooter.records.length, 0);
+  assert.equal(unknownFooter.rows[0].status, "rejected");
+  assert.equal(unknownFooter.errors.length > 0, true);
 });
 
 test("produces stable hashes across official column variants and header order", () => {

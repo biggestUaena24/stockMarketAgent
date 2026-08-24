@@ -382,6 +382,33 @@ function applyContributionOrWithdrawal(
   };
 }
 
+function applyOpeningPosition(
+  state: LedgerState,
+  transaction: Extract<LedgerTransaction, { type: "opening_position" }>,
+): LedgerState {
+  assertPositive("quantity", transaction.quantity);
+  assertPositive("costBasisNative", transaction.costBasisNative);
+  assertPositive("costBasisCad", transaction.costBasisCad);
+
+  const security = normalizeSecurity(transaction.security);
+  const key = securityKey(security);
+  const current = state.positions[key] ?? emptyPosition(security);
+  assertPositionCurrency(current, security);
+  const position = withAverageCosts({
+    ...current,
+    quantity: roundQuantity(current.quantity + transaction.quantity),
+    costBasisNative: roundMoney(
+      current.costBasisNative + transaction.costBasisNative,
+    ),
+    costBasisCad: roundMoney(current.costBasisCad + transaction.costBasisCad),
+  });
+
+  return {
+    ...state,
+    positions: { ...state.positions, [key]: position },
+  };
+}
+
 function applyBuy(
   state: LedgerState,
   transaction: Extract<LedgerTransaction, { type: "buy" }>,
@@ -555,6 +582,9 @@ export function applyTransaction(
     case "contribution":
     case "withdrawal":
       next = applyContributionOrWithdrawal(state, transaction);
+      break;
+    case "opening_position":
+      next = applyOpeningPosition(state, transaction);
       break;
     case "buy":
       next = applyBuy(state, transaction);

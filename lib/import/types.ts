@@ -42,6 +42,8 @@ export interface NormalizedHolding extends NormalizedRecordBase {
   currency: Currency;
   averageCost?: number;
   price?: number;
+  /** CAD per unit of the holding's native currency, when reported safely. */
+  fxRate?: number;
   asOfDate?: string;
 }
 

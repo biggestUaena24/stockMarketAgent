@@ -96,6 +96,53 @@ test("uses a provider's native USD price with the deterministic ledger FX rate",
   assert.equal(holding.markFreshness, "fresh");
 });
 
+test("maps imported holdings snapshots to cash-neutral opening positions", () => {
+  const importedOpening = {
+    ...buy("snapshot", "MSFT", "NASDAQ", "USD", 2, 100, 1.3),
+    importId: "wsh_example",
+    importRowHash: "example",
+    notes: "Opening position from Wealthsimple holdings CSV",
+  };
+  const portfolio = buildPortfolioView(
+    [importedOpening],
+    settings,
+    [quote("MSFT", 110, "USD", "2026-08-24T15:50:00.000Z", "fmp")],
+    now,
+  );
+
+  const holding = portfolio.holdings[0];
+  assert.ok(holding);
+  assert.equal(holding.costBasisCad, 260);
+  assert.equal(holding.averageCostNative, 100);
+  assert.equal(holding.averageCostCad, 130);
+  assert.equal(holding.markedValueCad, 286);
+  assert.equal(holding.estimatedLiquidationValueCad, 281.71);
+  assert.equal(portfolio.totals.fxFeesCad, 0);
+  assert.deepEqual(portfolio.ledgerCash, { CAD: 0, USD: 0 });
+});
+
+test("recognizes only the exact legacy holdings note as an opening position", () => {
+  const legacyOpening = {
+    ...buy("legacy", "MSFT", "NASDAQ", "USD", 1, 100, 1.3),
+    notes: "Opening position from Wealthsimple holdings CSV",
+  };
+  const ordinaryBuy = {
+    ...buy("ordinary", "MSFT", "NASDAQ", "USD", 1, 100, 1.3),
+    notes: "Opening position from Wealthsimple holdings CSV (edited)",
+    occurredAt: "2026-08-02T15:30:00.000Z",
+  };
+  const portfolio = buildPortfolioView(
+    [legacyOpening, ordinaryBuy],
+    settings,
+    [],
+    now,
+  );
+
+  assert.equal(portfolio.holdings[0]?.costBasisCad, 261.95);
+  assert.equal(portfolio.totals.fxFeesCad, 1.95);
+  assert.deepEqual(portfolio.ledgerCash, { CAD: -131.95, USD: 0 });
+});
+
 test("falls back explicitly to the ledger price when no compatible quote exists", () => {
   const portfolio = buildPortfolioView(
     [buy("shop-buy", "SHOP", "TSX", "CAD", 10, 100, 1)],

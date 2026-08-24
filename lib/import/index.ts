@@ -1,4 +1,5 @@
 export { parseCsv } from "./csv";
+export { resolveImportFxRate } from "./fx-rate";
 export { sha256, stableHash, stableStringify } from "./hash";
 export { assessImportSafety } from "./safety";
 export {

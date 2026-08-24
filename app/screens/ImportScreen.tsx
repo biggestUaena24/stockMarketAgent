@@ -156,7 +156,7 @@ export function ImportScreen() {
         <Card className="upload-card">
           <CardHeader
             title="1. Choose an official CSV"
-            description="Holdings snapshots need an average cost and as-of date. Activity rows need final prices, fees, and FX rates."
+            description="Holdings snapshots need an as-of date. Cedar uses a reported unit cost or safely derives it from Wealthsimple’s native book value and quantity."
           />
           <form onSubmit={submitPreview}>
             <button
@@ -211,8 +211,9 @@ export function ImportScreen() {
                   required
                 />
                 <small>
-                  Activity rows must contain their own dates; this fallback is
-                  used only for holdings snapshots.
+                  Used if a holdings file has no date; when Wealthsimple includes
+                  an official as-of footer, this date must match it. Activity rows
+                  must contain their own dates.
                 </small>
               </label>
               <label className="field">
@@ -248,7 +249,10 @@ export function ImportScreen() {
                   }}
                   required
                 />
-                <small>Used only when a USD row has no FX rate.</small>
+                <small>
+                  Used only when a USD row has no usable reported CAD/native
+                  book-value rate or activity FX rate.
+                </small>
               </label>
               <label className="field">
                 <span>Date order</span>

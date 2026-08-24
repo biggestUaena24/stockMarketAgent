@@ -17,6 +17,8 @@ import {
   type SavedProviderQuote,
 } from "./portfolio-market-quote";
 
+const HOLDINGS_OPENING_NOTE = "Opening position from Wealthsimple holdings CSV";
+
 export type PortfolioHoldingView = {
   key: string;
   symbol: string;
@@ -328,6 +330,22 @@ function toLedgerTransaction(
     exchange: record.exchange,
     currency: record.currency,
   } as const;
+  const importedOpeningPosition =
+    record.action === "BUY" &&
+    (record.importId?.startsWith("wsh_") === true ||
+      (record.importId === null && record.notes === HOLDINGS_OPENING_NOTE));
+  if (importedOpeningPosition) {
+    const costBasisNative = record.quantity * record.price;
+    return {
+      id: record.id,
+      occurredAt: record.occurredAt,
+      type: "opening_position",
+      security,
+      quantity: record.quantity,
+      costBasisNative,
+      costBasisCad: costBasisNative * record.fxRateToCad,
+    };
+  }
   if (record.action === "DIVIDEND") {
     return {
       id: record.id,

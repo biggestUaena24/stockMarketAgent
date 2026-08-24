@@ -23,10 +23,19 @@ type CanonicalField =
   | "type"
   | "symbol"
   | "exchange"
+  | "mic"
+  | "securityType"
+  | "positionDirection"
   | "quantity"
   | "averageCost"
+  | "bookValue"
+  | "bookValueCurrency"
+  | "bookValueCad"
+  | "bookValueCadCurrency"
   | "price"
   | "currency"
+  | "marketPriceCurrency"
+  | "marketValueCurrency"
   | "settlementCurrency"
   | "date"
   | "fee"
@@ -65,6 +74,9 @@ const FIELD_ALIASES = {
     "exchange",
     "market",
   ],
+  mic: ["market identifier code", "mic"],
+  securityType: ["security type", "asset class", "asset type"],
+  positionDirection: ["position direction", "direction"],
   quantity: [
     "position quantity",
     "total quantity",
@@ -88,6 +100,10 @@ const FIELD_ALIASES = {
     "avg cost",
     "unit book value",
   ],
+  bookValue: ["book value market"],
+  bookValueCurrency: ["book value currency market"],
+  bookValueCad: ["book value cad"],
+  bookValueCadCurrency: ["book value currency cad"],
   price: [
     "execution price",
     "fill price",
@@ -108,6 +124,8 @@ const FIELD_ALIASES = {
     "asset currency",
     "currency",
   ],
+  marketPriceCurrency: ["market price currency"],
+  marketValueCurrency: ["market value currency"],
   settlementCurrency: [
     "settlement currency",
     "account currency",
@@ -298,6 +316,7 @@ function formatScores(columns: ColumnMap): {
       (has("symbol") ? 3 : 0) +
       (has("quantity") ? 2 : 0) +
       (has("averageCost") ? 3 : 0) +
+      (has("bookValue") ? 3 : 0) +
       (has("price") ? 2 : 0) +
       (has("exchange") ? 1 : 0) +
       (has("currency") ? 1 : 0) +
@@ -530,6 +549,73 @@ function parseCurrency(
     ),
   );
   return undefined;
+}
+
+function optionalCurrency(
+  raw: string | undefined,
+  rowNumber: number,
+  field: string,
+  issues: ImportIssue[],
+): Currency | undefined {
+  if (!raw?.trim()) {
+    return undefined;
+  }
+  const parsed = canonicalCurrency(raw);
+  if (!parsed) {
+    issues.push(
+      issue(
+        "error",
+        "UNSUPPORTED_CURRENCY",
+        `${field} must be CAD or USD.`,
+        rowNumber,
+        field,
+      ),
+    );
+  }
+  return parsed;
+}
+
+function firstPopulatedValue(
+  row: CsvRow,
+  columns: ColumnReference[],
+): string | undefined {
+  for (const column of columns) {
+    const value = row.cells[column.index]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function isCashHoldingRow(row: CsvRow, columns: ColumnMap): boolean {
+  const securityType = firstPopulatedValue(row, columns.securityType);
+  if (!securityType) {
+    return false;
+  }
+  const symbol = firstPopulatedValue(row, columns.symbol)?.toUpperCase();
+  const exchange = firstPopulatedValue(row, columns.exchange);
+  const mic = firstPopulatedValue(row, columns.mic);
+  return (
+    ["cash", "currency"].includes(normalizeHeader(securityType)) &&
+    (symbol === "CAD" || symbol === "USD") &&
+    !exchange &&
+    !mic
+  );
+}
+
+function reportFooterDate(row: CsvRow): string | undefined {
+  const populated = row.cells.map((cell) => cell.trim()).filter(Boolean);
+  if (populated.length !== 1) {
+    return undefined;
+  }
+  const match = populated[0].match(
+    /^as\s+of\s+(\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}(?::\d{2})?\s+GMT[+-]\d{2}:\d{2})?$/i,
+  );
+  if (!match) {
+    return undefined;
+  }
+  return parseDateValue(match[1], "YMD").value;
 }
 
 function canonicalExchange(
@@ -800,7 +886,7 @@ function normalizedDate(
       issue(
         "warning",
         "DEFAULTED_DATE",
-        `${field} was supplied by the import options.`,
+        `${field} was supplied by the selected snapshot date or report footer.`,
         rowNumber,
         field,
       ),
@@ -918,6 +1004,13 @@ function holdingFromRow(
   const issues: ImportIssue[] = [];
   const symbolCell = readField(row, columns.symbol, "symbol", issues);
   const exchangeCell = readField(row, columns.exchange, "exchange", issues);
+  const micCell = readField(row, columns.mic, "mic", issues);
+  const positionDirectionCell = readField(
+    row,
+    columns.positionDirection,
+    "positionDirection",
+    issues,
+  );
   const quantityCell = readField(row, columns.quantity, "quantity", issues);
   const averageCostCell = readField(
     row,
@@ -925,13 +1018,70 @@ function holdingFromRow(
     "averageCost",
     issues,
   );
+  const bookValueCell = readField(
+    row,
+    columns.bookValue,
+    "bookValue",
+    issues,
+  );
+  const bookValueCurrencyCell = readField(
+    row,
+    columns.bookValueCurrency,
+    "bookValueCurrency",
+    issues,
+  );
+  const bookValueCadCell = readField(
+    row,
+    columns.bookValueCad,
+    "bookValueCad",
+    issues,
+  );
+  const bookValueCadCurrencyCell = readField(
+    row,
+    columns.bookValueCadCurrency,
+    "bookValueCadCurrency",
+    issues,
+  );
   const priceCell = readField(row, columns.price, "price", issues);
   const currencyCell = readField(row, columns.currency, "currency", issues);
+  const marketPriceCurrencyCell = readField(
+    row,
+    columns.marketPriceCurrency,
+    "marketPriceCurrency",
+    issues,
+  );
+  const marketValueCurrencyCell = readField(
+    row,
+    columns.marketValueCurrency,
+    "marketValueCurrency",
+    issues,
+  );
   const dateCell = readField(row, columns.date, "date", issues);
 
+  const explicitExchange = canonicalExchange(
+    exchangeCell.value,
+    row.startLine,
+    issues,
+  );
+  const micExchange = canonicalExchange(micCell.value, row.startLine, issues);
+  if (
+    explicitExchange &&
+    micExchange &&
+    explicitExchange !== micExchange
+  ) {
+    issues.push(
+      issue(
+        "error",
+        "EXCHANGE_MIC_MISMATCH",
+        "The Exchange and MIC columns identify different markets.",
+        row.startLine,
+        "exchange",
+      ),
+    );
+  }
   const security = canonicalSecurity(
     symbolCell.value,
-    exchangeCell.value,
+    explicitExchange ?? micExchange,
     options.defaultExchange,
     row.startLine,
     issues,
@@ -958,6 +1108,20 @@ function holdingFromRow(
       ),
     );
   }
+  if (
+    positionDirectionCell.value &&
+    normalizeHeader(positionDirectionCell.value) !== "long"
+  ) {
+    issues.push(
+      issue(
+        "error",
+        "UNSUPPORTED_POSITION_DIRECTION",
+        "Only long holdings can be imported; short positions are excluded.",
+        row.startLine,
+        "positionDirection",
+      ),
+    );
+  }
 
   const quantity = requiredNumber(
     quantityCell.value,
@@ -965,23 +1129,99 @@ function holdingFromRow(
     "quantity",
     issues,
   );
-  if (quantity !== undefined && quantity < 0) {
+  if (quantity !== undefined && quantity <= 0) {
     issues.push(
       issue(
         "error",
-        "NEGATIVE_HOLDING_QUANTITY",
-        "A holding quantity cannot be negative.",
+        "NON_POSITIVE_HOLDING_QUANTITY",
+        "A holding quantity must be greater than zero.",
         row.startLine,
         "quantity",
       ),
     );
   }
-  const averageCost = optionalNumber(
+  let averageCost = optionalNumber(
     averageCostCell.value,
     row.startLine,
     "averageCost",
     issues,
   );
+  const bookValue = optionalNumber(
+    bookValueCell.value,
+    row.startLine,
+    "bookValue",
+    issues,
+  );
+  const bookValueCad = optionalNumber(
+    bookValueCadCell.value,
+    row.startLine,
+    "bookValueCad",
+    issues,
+  );
+  if (bookValue !== undefined && bookValue < 0) {
+    issues.push(
+      issue(
+        "error",
+        "NEGATIVE_BOOK_VALUE",
+        "Native-currency book value cannot be negative.",
+        row.startLine,
+        "bookValue",
+      ),
+    );
+  }
+  if (bookValueCad !== undefined && bookValueCad < 0) {
+    issues.push(
+      issue(
+        "error",
+        "NEGATIVE_BOOK_VALUE",
+        "CAD book value cannot be negative.",
+        row.startLine,
+        "bookValueCad",
+      ),
+    );
+  }
+  if (
+    averageCost === undefined &&
+    bookValue !== undefined &&
+    bookValue > 0 &&
+    quantity !== undefined &&
+    quantity > 0
+  ) {
+    const derived = bookValue / quantity;
+    if (Number.isFinite(derived)) {
+      averageCost = derived;
+      issues.push(
+        issue(
+          "warning",
+          "DERIVED_AVERAGE_COST",
+          "Average cost per unit was derived from native book value divided by quantity.",
+          row.startLine,
+          "averageCost",
+        ),
+      );
+    } else {
+      issues.push(
+        issue(
+          "error",
+          "INVALID_DERIVED_AVERAGE_COST",
+          "The reported native book value and quantity do not produce a valid average cost.",
+          row.startLine,
+          "averageCost",
+        ),
+      );
+    }
+  }
+  if (averageCost === undefined && bookValue === 0) {
+    issues.push(
+      issue(
+        "error",
+        "NON_POSITIVE_BOOK_VALUE",
+        "A positive native book value or explicit average cost is required for an open holding.",
+        row.startLine,
+        "bookValue",
+      ),
+    );
+  }
   const price = optionalNumber(
     priceCell.value,
     row.startLine,
@@ -1022,16 +1262,114 @@ function holdingFromRow(
     );
   }
 
-  const currency = parseCurrency(
-    currencyCell.value,
-    [averageCostCell.header, priceCell.header].find(
-      (header) => currencyFromHeader(header) !== undefined,
+  const nativeCurrencyCandidates = [
+    optionalCurrency(
+      marketPriceCurrencyCell.value,
+      row.startLine,
+      "marketPriceCurrency",
+      issues,
     ),
-    options.defaultCurrency,
+    optionalCurrency(
+      bookValueCurrencyCell.value,
+      row.startLine,
+      "bookValueCurrency",
+      issues,
+    ),
+    optionalCurrency(
+      marketValueCurrencyCell.value,
+      row.startLine,
+      "marketValueCurrency",
+      issues,
+    ),
+    optionalCurrency(
+      currencyCell.value,
+      row.startLine,
+      "currency",
+      issues,
+    ),
+  ].filter((value): value is Currency => value !== undefined);
+  if (new Set(nativeCurrencyCandidates).size > 1) {
+    issues.push(
+      issue(
+        "error",
+        "CONFLICTING_CURRENCY_VALUES",
+        "The native-currency columns disagree for this holding.",
+        row.startLine,
+        "currency",
+      ),
+    );
+  }
+  const cadBookCurrency = optionalCurrency(
+    bookValueCadCurrencyCell.value,
     row.startLine,
-    "currency",
+    "bookValueCadCurrency",
     issues,
   );
+  if (cadBookCurrency && cadBookCurrency !== "CAD") {
+    issues.push(
+      issue(
+        "error",
+        "INVALID_CAD_BOOK_VALUE_CURRENCY",
+        "Book Value Currency (CAD) must be CAD.",
+        row.startLine,
+        "bookValueCadCurrency",
+      ),
+    );
+  }
+  const currency =
+    nativeCurrencyCandidates[0] ??
+    parseCurrency(
+      undefined,
+      [averageCostCell.header, priceCell.header].find(
+        (header) => currencyFromHeader(header) !== undefined,
+      ),
+      options.defaultCurrency,
+      row.startLine,
+      "currency",
+      issues,
+    );
+  let fxRate: number | undefined;
+  if (
+    currency === "USD" &&
+    bookValue !== undefined &&
+    bookValueCad !== undefined
+  ) {
+    if (bookValue > 0 && bookValueCad > 0) {
+      const derived = bookValueCad / bookValue;
+      if (Number.isFinite(derived) && derived > 0) {
+        fxRate = derived;
+        issues.push(
+          issue(
+            "warning",
+            "DERIVED_BOOK_FX_RATE",
+            "CAD per USD was derived from CAD book value divided by native book value.",
+            row.startLine,
+            "fxRate",
+          ),
+        );
+      } else {
+        issues.push(
+          issue(
+            "error",
+            "INVALID_DERIVED_FX_RATE",
+            "The reported book values do not produce a valid CAD-per-USD rate.",
+            row.startLine,
+            "fxRate",
+          ),
+        );
+      }
+    } else {
+      issues.push(
+        issue(
+          "warning",
+          "UNUSABLE_REPORTED_FX_RATE",
+          "The reported book values could not provide a positive CAD-per-USD rate; the reviewed fallback is required.",
+          row.startLine,
+          "fxRate",
+        ),
+      );
+    }
+  }
   const asOfDate = normalizedDate(
     dateCell.value,
     options.defaultDate,
@@ -1076,6 +1414,7 @@ function holdingFromRow(
     currency,
     averageCost,
     price,
+    ...(fxRate !== undefined ? { fxRate } : {}),
     asOfDate,
   } as const;
   const rowHash = stableHash(payload);
@@ -1762,13 +2101,14 @@ export function normalizeWealthsimpleCsv(
   if (
     kind === "holdings" &&
     header.columns.averageCost.length === 0 &&
+    header.columns.bookValue.length === 0 &&
     header.columns.price.length === 0
   ) {
     globalErrors.push(
       issue(
         "error",
         "MISSING_REQUIRED_COLUMN",
-        "A holdings CSV needs an average-cost or price column.",
+        "A holdings CSV needs an average-cost, native book-value, or price column.",
         header.row.startLine,
         "averageCost",
       ),
@@ -1836,13 +2176,123 @@ export function normalizeWealthsimpleCsv(
   const headerIndex = nonBlankRows.findIndex(
     (row) => row === header.row,
   );
-  const dataRows = nonBlankRows.slice(headerIndex + 1);
-  const normalizedRows = dataRows.map((row) => {
+  const allDataRows = nonBlankRows.slice(headerIndex + 1);
+  const footerRows =
+    kind === "holdings"
+      ? allDataRows.flatMap((row) => {
+          const date = reportFooterDate(row);
+          return date ? [{ row, date }] : [];
+        })
+      : [];
+  if (footerRows.length > 1) {
+    globalErrors.push(
+      issue(
+        "error",
+        "MULTIPLE_REPORT_FOOTERS",
+        "The holdings report contains more than one as-of footer.",
+        footerRows[0]?.row.startLine ?? header.row.startLine,
+        "asOfDate",
+      ),
+    );
+  }
+  const onlyFooter = footerRows.length === 1 ? footerRows[0] : undefined;
+  const lastDataRow = allDataRows.at(-1);
+  if (onlyFooter && onlyFooter.row.startLine !== lastDataRow?.startLine) {
+    globalErrors.push(
+      issue(
+        "error",
+        "REPORT_FOOTER_NOT_FINAL",
+        "The official Wealthsimple as-of footer must be the final non-empty row.",
+        onlyFooter.row.startLine,
+        "asOfDate",
+      ),
+    );
+  }
+  const footerDate =
+    onlyFooter && onlyFooter.row.startLine === lastDataRow?.startLine
+      ? onlyFooter.date
+      : undefined;
+  if (onlyFooter && footerDate) {
+    globalWarnings.push(
+      issue(
+        "warning",
+        "REPORT_FOOTER_USED",
+        "The official Wealthsimple as-of footer was used as the snapshot date and was not treated as a holding.",
+        onlyFooter.row.startLine,
+        "asOfDate",
+      ),
+    );
+  }
+  if (footerDate && options.defaultDate) {
+    const configuredDate = parseDateValue(
+      options.defaultDate,
+      options.dateOrder ?? "MDY",
+    ).value;
+    if (!configuredDate) {
+      globalErrors.push(
+        issue(
+          "error",
+          "INVALID_DATE",
+          "The selected holdings snapshot date is not valid.",
+          footerRows[0]?.row.startLine ?? header.row.startLine,
+          "asOfDate",
+        ),
+      );
+    } else if (configuredDate.slice(0, 10) !== footerDate) {
+      globalErrors.push(
+        issue(
+          "error",
+          "SNAPSHOT_DATE_MISMATCH",
+          "The selected holdings snapshot date does not match the official Wealthsimple as-of footer.",
+          footerRows[0]?.row.startLine ?? header.row.startLine,
+          "asOfDate",
+        ),
+      );
+    }
+  }
+  if (globalErrors.length > 0) {
+    return {
+      source: "wealthsimple",
+      kind,
+      records: [],
+      rows: [],
+      errors: globalErrors,
+      warnings: globalWarnings,
+      meta: {
+        headerRow: header.row.startLine,
+        recognizedFields: fields,
+        rawCsvRetained: false,
+      },
+    };
+  }
+
+  const effectiveOptions = footerDate
+    ? { ...options, defaultDate: footerDate }
+    : options;
+  const footerLineNumbers = new Set(
+    onlyFooter && footerDate ? [onlyFooter.row.startLine] : [],
+  );
+  const normalizedRows = allDataRows.flatMap((row) => {
+    if (footerLineNumbers.has(row.startLine)) {
+      return [];
+    }
+    if (kind === "holdings" && isCashHoldingRow(row, header.columns)) {
+      globalWarnings.push(
+        issue(
+          "warning",
+          "SKIPPED_CASH_BALANCE",
+          "This cash amount was not imported or reconciled and was not turned into a security trade or TFSA contribution. Update Available cash in Settings after import.",
+          row.startLine,
+          "securityType",
+        ),
+      );
+      return [];
+    }
     const normalized =
       kind === "holdings"
-        ? holdingFromRow(row, header.columns, options)
-        : activityFromRow(row, header.columns, options);
-    return { rowNumber: row.startLine, ...normalized };
+        ? holdingFromRow(row, header.columns, effectiveOptions)
+        : activityFromRow(row, header.columns, effectiveOptions);
+    return [{ rowNumber: row.startLine, ...normalized }];
   });
   const rows = applyDeduplication(
     normalizedRows,
