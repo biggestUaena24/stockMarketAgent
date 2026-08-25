@@ -42,10 +42,15 @@ export function DashboardScreen() {
         method: "POST",
         body: JSON.stringify({}),
       });
+      const trialCacheOnly = data?.settings.providerMode === "trial";
       setRunMessage(
         payload.run.status === "complete"
-          ? `Research finished with ${payload.run.recommendationCount} results.`
-          : "The run finished with limited data. Open the report for details.",
+          ? trialCacheOnly
+            ? `Saved research reviewed with ${payload.run.recommendationCount} results.`
+            : `Research finished with ${payload.run.recommendationCount} results.`
+          : trialCacheOnly
+            ? "The saved-data review found missing or stale evidence. Scheduled checks perform the trial refreshes."
+            : "The run finished with limited data. Open the report for details.",
       );
       await reload();
     } catch (caught) {
@@ -71,7 +76,13 @@ export function DashboardScreen() {
             disabled={running}
           >
             <Icon name={running ? "refresh" : "spark"} width={17} height={17} />
-            {running ? "Researching…" : "Run research now"}
+            {running
+              ? data?.settings.providerMode === "trial"
+                ? "Reviewing…"
+                : "Researching…"
+              : data?.settings.providerMode === "trial"
+                ? "Review saved data"
+                : "Run research now"}
           </button>
         }
       />
@@ -122,6 +133,16 @@ function DashboardContent({ data }: { data: DashboardPayload }) {
           <Link className="inline-link" href="/settings">
             Complete setup <Icon name="arrow" width={14} height={14} />
           </Link>
+        </Notice>
+      ) : null}
+
+      {data.settings.providerMode === "trial" ? (
+        <Notice title="Trial market data refreshes on schedule" tone="quiet" icon="clock">
+          <p>
+            The 7:30 a.m. and 5:30 p.m. Calgary checks refresh Alpha Vantage
+            data. Manual reviews use the saved cache and do not spend the
+            scheduled request allowance.
+          </p>
         </Notice>
       ) : null}
 

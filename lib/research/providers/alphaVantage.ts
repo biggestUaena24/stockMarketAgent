@@ -17,6 +17,10 @@ import {
   type ProviderCache,
 } from "./http";
 import {
+  InMemoryProviderRequestBudget,
+  type ProviderRequestBudget,
+} from "./request-budget";
+import {
   clampSentiment,
   finiteInteger,
   finiteNumber,
@@ -40,6 +44,8 @@ export interface AlphaVantageTrialOptions {
   requestSpacingMs?: number;
   clockMs?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
+  requestBudget?: ProviderRequestBudget;
+  cacheOnly?: boolean;
 }
 
 function objectValue(value: unknown): RawObject | null {
@@ -53,9 +59,17 @@ function alphaPayloadError(payload: unknown): string | null {
   if (!record) {
     return null;
   }
-  for (const key of ["Error Message", "Note", "Information"]) {
-    if (typeof record[key] === "string") {
-      return record[key] as string;
+  const envelopeKeys = new Set(["error message", "note", "information"]);
+  for (const [key, value] of Object.entries(record)) {
+    const normalizedKey = key
+      .trim()
+      .toLowerCase()
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ");
+    if (envelopeKeys.has(normalizedKey)) {
+      return typeof value === "string" && value.trim()
+        ? value.trim()
+        : "Alpha Vantage returned an error response."
     }
   }
   return null;
@@ -65,14 +79,62 @@ function alphaProviderError(
   message: string,
   sensitiveValues: readonly string[] = [],
 ): ProviderError {
-  const safeMessage = redactSensitiveText(message, sensitiveValues);
+  const safeMessage = redactSensitiveText(message, sensitiveValues).slice(
+    0,
+    800,
+  );
   return {
-    code: /frequency|rate limit|requests per/i.test(safeMessage)
+    code:
+      /frequency|rate[\s_-]*limit|requests?\s+per|too many requests|quota|api call volume|request volume|higher api call/i.test(
+        safeMessage,
+      )
       ? "rate-limit"
       : "upstream",
     message: `Alpha Vantage: ${safeMessage}`,
     retryable: true,
   };
+}
+
+function alphaMalformedPayload(message: string): ProviderError {
+  return {
+    code: "malformed-response",
+    message,
+    retryable: true,
+  };
+}
+
+function quotePayloadError(payload: unknown, symbol: string): ProviderError | null {
+  const record = objectValue(payload);
+  const row = objectValue(record?.["Global Quote"]);
+  return row && finiteNumber(row["05. price"]) !== null
+    ? null
+    : alphaMalformedPayload(
+        `Alpha Vantage returned no usable quote for ${symbol}.`,
+      );
+}
+
+function companyFactsPayloadError(
+  payload: unknown,
+  symbol: string,
+): ProviderError | null {
+  const record = objectValue(payload);
+  return record &&
+    Object.keys(record).length > 0 &&
+    typeof record.Symbol === "string" &&
+    record.Symbol.trim().length > 0
+    ? null
+    : alphaMalformedPayload(
+        `Alpha Vantage returned no company overview for ${symbol}.`,
+      );
+}
+
+function newsPayloadError(payload: unknown, symbol: string): ProviderError | null {
+  const record = objectValue(payload);
+  return record && Array.isArray(record.feed)
+    ? null
+    : alphaMalformedPayload(
+        `Alpha Vantage returned no usable news feed for ${symbol}.`,
+      );
 }
 
 export class AlphaVantageTrialProvider implements MarketResearchProvider {
@@ -86,8 +148,10 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
   private readonly requestSpacingMs: number;
   private readonly clockMs: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly requestBudget: ProviderRequestBudget;
+  private readonly cacheOnly: boolean;
   private requestQueue: Promise<void> = Promise.resolve();
-  private nextRequestAt = 0;
+  private rateLimitCircuitOpen = false;
 
   constructor(options: AlphaVantageTrialOptions = {}) {
     this.apiKey = options.apiKey?.trim() ?? "";
@@ -105,12 +169,16 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
       options.sleep ??
       ((milliseconds) =>
         new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.requestBudget =
+      options.requestBudget ?? new InMemoryProviderRequestBudget();
+    this.cacheOnly = options.cacheOnly ?? false;
   }
 
   private async call<T>(
     operation: string,
     parameters: Record<string, string>,
     cacheTtlMs: number,
+    validatePayload: (payload: unknown) => ProviderError | null,
   ): Promise<ProviderResult<T>> {
     if (!this.apiKey) {
       return configurationError(
@@ -127,24 +195,77 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
     }
     url.searchParams.set("apikey", this.apiKey);
     const cacheKey = `alpha-vantage:${operation}:${JSON.stringify(parameters)}`;
-    const result = await requestJson<T>({
-      profile: this.profile,
-      operation,
-      url,
-      cacheKey,
-      cacheTtlMs,
-      fetcher: this.throttledFetch,
-      cache: this.cache,
-      now: this.now,
-      payloadError: (payload) => {
-        const message = alphaPayloadError(payload);
-        return message ? alphaProviderError(message, [this.apiKey]) : null;
-      },
-    });
-    return result;
+    return this.serializeRequest(() =>
+      requestJson<T>({
+        profile: this.profile,
+        operation,
+        url,
+        cacheKey,
+        cacheTtlMs,
+        fetcher: this.fetcher,
+        cache: this.cache,
+        now: this.now,
+        beforeNetwork: async () => {
+          if (this.rateLimitCircuitOpen) {
+            return {
+              code: "rate-limit",
+              message:
+                "Alpha Vantage requests were stopped for this run after a rate-limit response.",
+              retryable: true,
+            };
+          }
+          if (this.cacheOnly) {
+            return {
+              code: "unsupported",
+              message:
+                "Alpha Vantage cache-only mode found no fresh cached value; no network request was made.",
+              retryable: false,
+            };
+          }
+          const reservation = await this.requestBudget.reserve({
+            operation,
+            cacheKey,
+            nowMs: this.clockMs(),
+            spacingMs: this.requestSpacingMs,
+          });
+          if (!reservation.allowed) {
+            const retryAt = Number.isFinite(reservation.retryAt)
+              ? new Date(reservation.retryAt).toISOString()
+              : "the next provider quota window";
+            return {
+              code: "rate-limit",
+              message: `Alpha Vantage request budget exhausted (${reservation.usedCount}/${reservation.limit}); retry after ${retryAt}.`,
+              retryable: true,
+            };
+          }
+          if (!Number.isFinite(reservation.scheduledAtMs)) {
+            throw new Error("The provider request budget returned an invalid schedule.");
+          }
+          const waitMs = Math.max(
+            0,
+            reservation.scheduledAtMs - this.clockMs(),
+          );
+          if (waitMs > 0) await this.sleep(waitMs);
+          return null;
+        },
+        payloadError: (payload) => {
+          const message = alphaPayloadError(payload);
+          return message
+            ? alphaProviderError(message, [this.apiKey])
+            : validatePayload(payload);
+        },
+        onError: (error) => {
+          if (error.code === "rate-limit") {
+            this.rateLimitCircuitOpen = true;
+          }
+        },
+      }),
+    );
   }
 
-  private readonly throttledFetch: FetchLike = async (input, init) => {
+  private async serializeRequest<T>(
+    request: () => Promise<ProviderResult<T>>,
+  ): Promise<ProviderResult<T>> {
     let release!: () => void;
     const previous = this.requestQueue;
     this.requestQueue = new Promise<void>((resolve) => {
@@ -152,21 +273,18 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
     });
     await previous;
     try {
-      const waitMs = Math.max(0, this.nextRequestAt - this.clockMs());
-      if (waitMs > 0) await this.sleep(waitMs);
-      this.nextRequestAt = this.clockMs() + this.requestSpacingMs;
+      return await request();
     } finally {
       release();
     }
-    const fetcher = this.fetcher ?? globalThis.fetch.bind(globalThis);
-    return fetcher(input, init);
-  };
+  }
 
   async getQuote(symbol: string): Promise<ProviderResult<NormalizedQuote>> {
     const result = await this.call<RawObject>(
       "quote",
       { function: "GLOBAL_QUOTE", symbol },
       30 * 60 * 1_000,
+      (payload) => quotePayloadError(payload, symbol),
     );
     if (!result.ok) {
       return result;
@@ -206,6 +324,7 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
       "company-facts",
       { function: "OVERVIEW", symbol },
       24 * 60 * 60 * 1_000,
+      (payload) => companyFactsPayloadError(payload, symbol),
     );
     if (!result.ok) {
       return result;
@@ -294,6 +413,7 @@ export class AlphaVantageTrialProvider implements MarketResearchProvider {
       "company-news",
       parameters,
       30 * 60 * 1_000,
+      (payload) => newsPayloadError(payload, symbol),
     );
     if (!result.ok) {
       return result;

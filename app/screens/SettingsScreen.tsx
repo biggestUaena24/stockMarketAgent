@@ -178,7 +178,7 @@ function SettingsForm({
           "The single-stock maximum cannot exceed the total individual-stock limit.",
         );
       }
-      const watchlistLimit = providerMode === "trial" ? 5 : 25;
+      const watchlistLimit = providerMode === "trial" ? 4 : 25;
       if (watchlist.length > watchlistLimit) {
         throw new Error(
           `${providerMode === "trial" ? "Trial mode" : "Full mode"} supports at most ${watchlistLimit} watchlist symbols.`,
@@ -400,12 +400,12 @@ function SettingsForm({
             title="Research watchlist"
             description={
               providerMode === "trial"
-                ? "Trial research is hard-capped at five unique symbols per run"
+                ? "Trial scheduled research covers four unique symbols, with holdings first"
                 : "Full mode supports up to 25 owner-selected symbols"
             }
             action={
               <Badge tone={providerMode === "trial" ? "watch" : "info"}>
-                {providerMode === "trial" ? "Maximum 5" : "Maximum 25"}
+                {providerMode === "trial" ? "Maximum 4" : "Maximum 25"}
               </Badge>
             }
           />
@@ -418,8 +418,9 @@ function SettingsForm({
               placeholder={"XGRO.TO\nVCN.TO\nVUN.TO"}
             />
             <small>
-              Use provider-compatible symbols. A watchlist entry is not a buy
-              recommendation.
+              Use provider-compatible symbols. In trial mode, current holdings
+              use the four scheduled-research slots first; watchlist symbols use
+              any remaining slots. A watchlist entry is not a buy recommendation.
             </small>
           </label>
           <Notice title="Safety universe remains enforced" tone="quiet" icon="shield">
@@ -498,7 +499,7 @@ function SettingsForm({
                 }}
               >
                 <option value="trial">
-                  Alpha Vantage trial — research only, up to 5 symbols
+                  Alpha Vantage trial — research only, up to 4 scheduled symbols
                 </option>
                 <option value="full">
                   FMP full — paid plan required
@@ -525,6 +526,8 @@ function SettingsForm({
               <p>
                 Treat Alpha Vantage trial quotes as end-of-day research. Verify
                 any current price in Wealthsimple before making a manual choice.
+                Scheduled Calgary checks refresh provider data; manual reruns
+                review saved cache without spending that request allowance.
               </p>
             </Notice>
           ) : (

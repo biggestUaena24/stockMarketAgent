@@ -49,6 +49,16 @@ export interface JsonRequestOptions<T = unknown> {
   cache?: ProviderCache;
   now?: () => Date;
   payloadError?: (data: T) => ProviderError | null;
+  beforeNetwork?: (
+    context: ProviderPreNetworkContext,
+  ) => ProviderError | null | Promise<ProviderError | null>;
+  onError?: (error: ProviderError) => void;
+}
+
+export interface ProviderPreNetworkContext {
+  operation: string;
+  cacheKey: string;
+  requestedAt: string;
 }
 
 function endpointWithoutSecrets(url: URL): string {
@@ -153,6 +163,22 @@ function staleFallback<T>(
   };
 }
 
+function reportError<T>(
+  options: JsonRequestOptions<T>,
+  error: ProviderError,
+): ProviderError {
+  options.onError?.(error);
+  return error;
+}
+
+function preNetworkFailure(): ProviderError {
+  return {
+    code: "upstream",
+    message: "The market-data request guard could not reserve a request.",
+    retryable: true,
+  };
+}
+
 export async function requestJson<T>(
   options: JsonRequestOptions<T>,
 ): Promise<ProviderResult<T>> {
@@ -186,6 +212,26 @@ export async function requestJson<T>(
     };
   }
 
+
+  if (options.beforeNetwork) {
+    let blocked: ProviderError | null;
+    try {
+      blocked = await options.beforeNetwork({
+        operation: options.operation,
+        cacheKey: options.cacheKey,
+        requestedAt,
+      });
+    } catch {
+      blocked = preNetworkFailure();
+    }
+    if (blocked) {
+      const normalized = reportError(options, blocked);
+      const fallback = staleFallback(cached, baseMeta, normalized);
+      if (fallback) return fallback;
+      return { ok: false, error: normalized, meta: baseMeta };
+    }
+  }
+
   const fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -200,7 +246,7 @@ export async function requestJson<T>(
       signal: controller.signal,
     });
   } catch (error) {
-    const normalized = networkError(error);
+    const normalized = reportError(options, networkError(error));
     const fallback = staleFallback(cached, baseMeta, normalized);
     if (fallback) {
       return fallback;
@@ -213,7 +259,7 @@ export async function requestJson<T>(
   const receivedAtDate = now();
   const receivedAt = receivedAtDate.toISOString();
   if (!response.ok) {
-    const normalized = httpError(response.status);
+    const normalized = reportError(options, httpError(response.status));
     const fallback = staleFallback(cached, baseMeta, normalized);
     if (fallback) {
       return fallback;
@@ -229,24 +275,28 @@ export async function requestJson<T>(
   try {
     data = (await response.json()) as T;
   } catch {
+    const normalized = reportError(options, {
+      code: "malformed-response",
+      message: "The market-data provider returned invalid JSON.",
+      retryable: true,
+    });
+    const fallback = staleFallback(cached, baseMeta, normalized);
+    if (fallback) return fallback;
     return {
       ok: false,
-      error: {
-        code: "malformed-response",
-        message: "The market-data provider returned invalid JSON.",
-        retryable: true,
-      },
+      error: normalized,
       meta: { ...baseMeta, receivedAt },
     };
   }
 
   const payloadError = options.payloadError?.(data);
   if (payloadError) {
-    const fallback = staleFallback(cached, baseMeta, payloadError);
+    const normalized = reportError(options, payloadError);
+    const fallback = staleFallback(cached, baseMeta, normalized);
     if (fallback) return fallback;
     return {
       ok: false,
-      error: payloadError,
+      error: normalized,
       meta: { ...baseMeta, receivedAt },
     };
   }

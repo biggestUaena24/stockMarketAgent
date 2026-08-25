@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   index,
   integer,
+  primaryKey,
   real,
   sqliteTable,
   text,
@@ -219,6 +220,28 @@ export const providerCache = sqliteTable("provider_cache", {
   cachedAt: text("cached_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   expiresAt: text("expires_at").notNull(),
 });
+
+export const providerRequestBudgets = sqliteTable(
+  "provider_request_budgets",
+  {
+    provider: text("provider").notNull(),
+    credentialFingerprint: text("credential_fingerprint").notNull(),
+    quotaDate: text("quota_date").notNull(),
+    usedCount: integer("used_count").notNull().default(0),
+    scheduledStartMs: integer("scheduled_start_ms").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({
+      name: "provider_request_budgets_pk",
+      columns: [
+        table.provider,
+        table.credentialFingerprint,
+        table.quotaDate,
+      ],
+    }),
+  ],
+);
 
 export const paperTrades = sqliteTable(
   "paper_trades",

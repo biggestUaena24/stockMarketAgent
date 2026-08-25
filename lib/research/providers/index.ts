@@ -14,6 +14,14 @@ export {
   MemoryProviderCache,
   requestJson,
   type FetchLike,
+  type ProviderPreNetworkContext,
   type ProviderCache,
   type ProviderCacheEntry,
 } from "./http";
+export {
+  InMemoryProviderRequestBudget,
+  type InMemoryProviderRequestBudgetOptions,
+  type ProviderRequestBudget,
+  type ProviderRequestReservation,
+  type ProviderRequestReservationInput,
+} from "./request-budget";

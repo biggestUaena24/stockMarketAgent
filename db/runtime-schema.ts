@@ -145,6 +145,16 @@ export const runtimeSchemaStatements = [
     cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS provider_request_budgets (
+    provider TEXT NOT NULL,
+    credential_fingerprint TEXT NOT NULL,
+    quota_date TEXT NOT NULL,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    scheduled_start_ms INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT provider_request_budgets_pk
+      PRIMARY KEY (provider, credential_fingerprint, quota_date)
+  )`,
   `CREATE TABLE IF NOT EXISTS paper_trades (
     id TEXT PRIMARY KEY NOT NULL,
     owner_email TEXT NOT NULL,

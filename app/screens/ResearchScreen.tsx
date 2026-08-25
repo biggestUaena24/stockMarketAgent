@@ -112,6 +112,10 @@ function ResearchResult({ symbol }: { symbol: string }) {
   const { data, error, loading, reload } = useApi<ResearchPayload>(
     `/api/research?symbol=${encodeURIComponent(symbol)}`,
   );
+  const settings = useApi<{
+    settings: { providerMode: "trial" | "full" };
+  }>("/api/settings");
+  const trialMode = settings.data?.settings.providerMode === "trial";
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<RunNotice | null>(null);
 
@@ -131,11 +135,15 @@ function ResearchResult({ symbol }: { symbol: string }) {
         covered
           ? {
               title: completed
-                ? `${symbol} research was refreshed`
+                ? trialMode
+                  ? `${symbol} saved research was reviewed`
+                  : `${symbol} research was refreshed`
                 : `${symbol} was reviewed with limited data`,
               detail:
                 payload.run.errors[0] ??
-                "Open the source list and timestamps before making any decision.",
+                (trialMode
+                  ? "Alpha trial manual reviews use saved cache. Scheduled Calgary checks perform provider refreshes."
+                  : "Open the source list and timestamps before making any decision."),
               tone: completed ? "quiet" : "warning",
             }
           : {
@@ -189,14 +197,21 @@ function ResearchResult({ symbol }: { symbol: string }) {
               disabled={running}
             >
               <Icon name="refresh" width={17} height={17} />
-              {running ? "Researching…" : "Run research again"}
+              {running
+                ? trialMode
+                  ? "Reviewing…"
+                  : "Researching…"
+                : trialMode
+                  ? "Review saved data"
+                  : "Run research again"}
             </button>
           }
         />
         <div className="timezone-note">
           <Icon name="shield" width={17} height={17} />
-          Manual reruns use the same deterministic gates as scheduled reports
-          and never submit a trade.
+          {trialMode
+            ? "Alpha trial manual reruns use saved cache. The scheduled 7:30 a.m. and 5:30 p.m. Calgary runs perform provider refreshes and never submit a trade."
+            : "Manual reruns use the same deterministic gates as scheduled reports and never submit a trade."}
         </div>
       </Card>
 

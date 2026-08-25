@@ -113,16 +113,16 @@ test("freshness and source-conflict gates block unsafe evidence", () => {
   assert.equal(quality.conflicts.conflicts[0]?.field, "price");
 });
 
-test("trial provider enforces a maximum five-symbol research batch", () => {
+test("trial provider enforces a maximum four-symbol research batch", () => {
   const symbols = ["RY.TRT", "TD.TRT", "SHOP.TRT", "AAPL", "MSFT", "NVDA"];
   const trial = selectResearchSymbols(
     symbols,
     ALPHA_VANTAGE_TRIAL_PROFILE,
   );
   assert.equal(trial.withinLimit, false);
-  assert.deepEqual(trial.accepted, symbols.slice(0, 5));
-  assert.deepEqual(trial.rejected, ["NVDA"]);
-  assert.equal(trial.limit, 5);
+  assert.deepEqual(trial.accepted, symbols.slice(0, 4));
+  assert.deepEqual(trial.rejected, ["MSFT", "NVDA"]);
+  assert.equal(trial.limit, 4);
 
   const full = selectResearchSymbols(symbols, FMP_FULL_PROFILE);
   assert.equal(full.withinLimit, true);

@@ -9,7 +9,7 @@ export const ALPHA_VANTAGE_TRIAL_PROFILE = {
   mode: "trial",
   displayName: "Alpha Vantage trial",
   isFullDataProvider: false,
-  maxResearchSymbols: 5,
+  maxResearchSymbols: 4,
   documentedDailyRequestLimit: 25,
   capabilities: {
     quoteFreshness: "end-of-day",
@@ -22,7 +22,7 @@ export const ALPHA_VANTAGE_TRIAL_PROFILE = {
   },
   warnings: [
     "Trial quotes must be treated as end-of-day research data.",
-    "The trial is capped at five researched symbols per run.",
+    "Trial runs research at most four unique holdings and watchlist symbols, with holdings first.",
     "Coverage and freshness must be verified for every Canadian symbol.",
   ],
 } as const satisfies ResearchProviderProfile;

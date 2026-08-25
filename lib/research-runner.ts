@@ -17,6 +17,7 @@ import {
   type ResearchSlot,
 } from "@/lib/calgary-time";
 import { D1ProviderCache } from "@/lib/d1-provider-cache";
+import { D1ProviderRequestBudget } from "@/lib/d1-provider-request-budget";
 import { sendResearchRunEmail } from "@/lib/email";
 import { newId, sha256 } from "@/lib/ids";
 import { marketCalendarState } from "@/lib/market-calendar";
@@ -140,7 +141,7 @@ export async function executeResearchRun(
   const now = new Date();
   const runId = newId("run");
   const settings = await getOrCreateSettings(request.ownerEmail);
-  const provider = providerFor(settings);
+  const provider = providerFor(settings, request);
   const modelVersion = getRuntimeEnv("OPENAI_API_KEY")
     ? RESEARCH_MODEL
     : "deterministic-fallback";
@@ -450,7 +451,16 @@ async function researchOne(input: {
     dataAsOf,
     researchOnly: !decision.liveLabelEligible,
   });
-  if (input.settings.paperTrialStartedAt && quoteData?.currency === "CAD") {
+  const staleFallbackQuote =
+    bundle.quote.ok && bundle.quote.meta.cache.state === "stale-fallback";
+  if (input.settings.paperTrialStartedAt && staleFallbackQuote) {
+    warnings.push(
+      `Paper tracking skipped for ${input.symbol}: an expired cache fallback cannot settle queued trades, record paper observations, or queue paper actions.`,
+    );
+  } else if (
+    input.settings.paperTrialStartedAt &&
+    quoteData?.currency === "CAD"
+  ) {
     await settleQueuedPaperTrades({
       ownerEmail: input.ownerEmail,
       symbol: input.symbol,
@@ -504,16 +514,29 @@ async function researchOne(input: {
   };
 }
 
-function providerFor(settings: OwnerSettings): MarketResearchProvider {
+function providerFor(
+  settings: OwnerSettings,
+  request: Pick<RunRequest, "trigger">,
+): MarketResearchProvider {
   if (settings.providerMode === "full") {
     return new FmpFullProvider({
       apiKey: getRuntimeEnv("FMP_API_KEY"),
       cache: new D1ProviderCache("fmp"),
     });
   }
+  const apiKey = getRuntimeEnv("ALPHA_VANTAGE_API_KEY");
   return new AlphaVantageTrialProvider({
-    apiKey: getRuntimeEnv("ALPHA_VANTAGE_API_KEY"),
+    apiKey,
     cache: new D1ProviderCache("alpha-vantage"),
+    requestBudget:
+      request.trigger === "scheduled" && apiKey
+        ? new D1ProviderRequestBudget({
+            provider: "alpha-vantage",
+            credential: apiKey,
+            dailyLimit: 24,
+          })
+        : undefined,
+    cacheOnly: request.trigger === "manual",
   });
 }
 

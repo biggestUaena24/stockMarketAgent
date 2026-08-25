@@ -8,6 +8,13 @@
       "when": 1784866016573,
       "tag": "0000_tranquil_crystal",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787627918833,
+      "tag": "0001_stale_violations",
+      "breakpoints": true
     }
   ]
 }
